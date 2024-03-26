@@ -1,3 +1,7 @@
 {
-    "haskell.formattingProvider": "fourmolu"
+    "haskell.formattingProvider": "fourmolu",
+    "cSpell.words": [
+        "forall",
+        "Succ"
+    ]
 }
