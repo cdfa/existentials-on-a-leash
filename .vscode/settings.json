@@ -3,5 +3,8 @@
     "cSpell.words": [
         "forall",
         "Succ"
-    ]
+    ],
+    "workbench.editorAssociations": {
+        "*.md": "vscode.markdown.preview.editor"
+    }
 }

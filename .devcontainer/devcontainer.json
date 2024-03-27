@@ -1,24 +1,13 @@
 {
     "name": "taking-existentials-on-a-leash",
-    "dockerFile": "Dockerfile",
-    "context": "${localWorkspaceFolder}",
-    "build": {
-      "args": {
-        "USER_UID": "${localEnv:USER_UID}",
-        "USER_GID": "${localEnv:USER_GID}"
-      },
-    },
-  
-    // run arguments passed to docker
-    "runArgs": [
-      "--security-opt", "label=disable"
-    ],
-  
-    "overrideCommand": false,
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "devcontainer",
+    "workspaceFolder": "/workspace",
+
     "userEnvProbe": "loginShell",
     "updateRemoteUserUID": false,
-  
-    "onCreateCommand": "nix-shell --command 'nix-collect-garbage --delete-old; nix-store --optimise; echo done building nix dev environment'",
+
+    "onCreateCommand": "direnv exec . /bin/bash -c 'nix-collect-garbage --delete-old; nix-store --optimise; echo done building nix dev environment'",
     "waitFor": "onCreateCommand",
   
     "customizations": {
@@ -30,6 +19,12 @@
                 "justusadam.language-haskell",
                 "dqisme.sync-scroll",
             ],
-        }
+        },
+        "codespaces": {
+          "openFiles": [
+            "existentials-on-a-leash.lhs",
+            "existentials-on-a-leash.md",
+          ]
+        },
     },
   }
