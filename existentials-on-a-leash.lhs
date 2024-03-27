@@ -48,8 +48,6 @@ Therefore, it is safe to substitute an arbitrary type `b` for `a`, which `bindFr
 However, you can do this only once.
 If `a` is bound multiple times, it may lead to type conflicts:
 
-% \begin{code}
-
 ```haskell
 conflict = withFresh $ \(fresh :: Fresh a) ->
   let
@@ -58,8 +56,6 @@ conflict = withFresh $ \(fresh :: Fresh a) ->
     Refl = trans intEqualsA aEqualsChar :: Int :~: Char
   in error "Int /= Char"
 ```
-
-% \end{code}
 
 To prevent this, we only allow using the `Fresh`-token once using a linear arrow in `withFresh`.
 

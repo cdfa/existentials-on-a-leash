@@ -18,7 +18,7 @@
     "userEnvProbe": "loginShell",
     "updateRemoteUserUID": false,
   
-    "onCreateCommand": "nix-shell --command 'echo done building nix dev environment'",
+    "onCreateCommand": "nix-shell --command 'nix-collect-garbage --delete-old; nix-store --optimise; echo done building nix dev environment'",
     "waitFor": "onCreateCommand",
   
     "customizations": {
@@ -32,6 +32,4 @@
             ],
         }
     },
-  
-    "postCreateCommand": "direnv exec ghc --version",
   }
