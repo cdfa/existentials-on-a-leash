@@ -1,6 +1,8 @@
-{ pkgs ? import (builtins.fetchGit {
-  url = "https://github.com/nixos/nixpkgs/";
-  ref = "refs/tags/23.11";
+{ pkgs ? import ((import <nixpkgs> { }).fetchFromGitHub {
+  owner = "nixos";
+  repo = "nixpkgs";
+  rev = "23.11";
+  hash = "sha256-MxCVrXY6v4QmfTwIysjjaX0XUhqBbxTWWB4HXtDYsdk=";
 }) {} }:
 let
   haskellPackages = pkgs.haskell.packages.ghc96.override
