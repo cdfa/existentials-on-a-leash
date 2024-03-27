@@ -1,12 +1,10 @@
-{ pkgs ? import <nixpkgs> { } }:
+{ pkgs ? import (builtins.fetchGit {
+  url = "https://github.com/nixos/nixpkgs/";
+  ref = "refs/tags/23.11";
+}) {} }:
 let
-  all-cabal-hashes = pkgs.fetchurl {
-    url = "https://github.com/commercialhaskell/all-cabal-hashes/archive/d77837f979c4b15fe0eb25cdf8a0463773434c9d.tar.gz";
-    sha256 = "sha256-dRJw1rA5hZHZ5ftxe+G2YekiYwqUxUIphxiDy23YMAY=";
-  };
   haskellPackages = pkgs.haskell.packages.ghc96.override
     {
-      # inherit all-cabal-hashes;
       overrides = self: super:
         {
           equational-reasoning = self.callCabal2nix "equational-reasoning"
@@ -41,7 +39,7 @@ pkgs.mkShell
     haskell-language-server
 
     pkgs.cabal-install
-    pkgs.rnix-lsp
+    pkgs.nil
     (pkgs.writeShellScriptBin
       "build"
       "${unlit}/bin/unlit --to=backtickfence --language=haskell --input=existentials-on-a-leash.lhs | ${pkgs.gnused}/bin/sed 's/^\\\\#/#/' > existentials-on-a-leash.md")
