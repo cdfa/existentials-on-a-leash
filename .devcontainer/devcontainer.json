@@ -1,30 +1,43 @@
 {
-    "name": "taking-existentials-on-a-leash",
-    "dockerComposeFile": "docker-compose.yml",
-    "service": "devcontainer",
-    "workspaceFolder": "/workspace",
-
-    "userEnvProbe": "loginShell",
-    "updateRemoteUserUID": false,
-
-    "onCreateCommand": "direnv exec . /bin/bash -c 'nix-collect-garbage --delete-old; nix-store --optimise; echo done building nix dev environment'",
-    "waitFor": "onCreateCommand",
-  
-    "customizations": {
-        "vscode": {
-            "extensions": [
-                "jnoortheen.nix-ide",
-                "mkhl.direnv",
-                "haskell.haskell",
-                "justusadam.language-haskell",
-                "dqisme.sync-scroll",
-            ],
-        },
-        "codespaces": {
-          "openFiles": [
-            "existentials-on-a-leash.lhs",
-            "existentials-on-a-leash.md",
-          ]
-        },
+  "dockerFile": "Dockerfile",
+  "context": "${localWorkspaceFolder}",
+  "build": {
+    "args": {
+      "USER_UID": "${localEnv:USER_UID}",
+      "USER_GID": "${localEnv:USER_GID}"
     },
-  }
+  },
+  "mounts": [
+    {
+      "source": "taking-existentials-on-a-leash-nix",
+      "target": "/nix",
+      "type": "volume"
+    }
+  ],
+  "runArgs": [
+    "--security-opt",
+    "label=disable"
+  ],
+  "overrideCommand": false,
+  "userEnvProbe": "loginShell",
+  "updateRemoteUserUID": false,
+  "onCreateCommand": "direnv exec . /bin/bash -c 'nix-collect-garbage --delete-old; nix-store --optimise; echo done building nix dev environment'",
+  "waitFor": "onCreateCommand",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "jnoortheen.nix-ide",
+        "mkhl.direnv",
+        "haskell.haskell",
+        "justusadam.language-haskell",
+        "dqisme.sync-scroll",
+      ],
+    },
+    "codespaces": {
+      "openFiles": [
+        "existentials-on-a-leash.lhs",
+        "existentials-on-a-leash.md",
+      ]
+    },
+  },
+}
