@@ -1,5 +1,7 @@
 \# Test
 
+% todo: remove ghc-typelits-presburger ghc-typelits-knownnat if not needed
+
 <details>
 <summary>Pragma's and imports</summary>
 
@@ -102,8 +104,8 @@ filterIsLazy = withFresh (\fresh -> tryHead (filter fresh (> 0) unsafeTestVec))
 
 \end{code}
 
-> -- >>> filterIsLazy
-> -- Just 1
+ > -- >>> filterIsLazy
+ > -- Just 1
 
 % \begin{code}
 
@@ -140,18 +142,45 @@ filterIsLazy = withFresh (\fresh -> tryHead (filter fresh (> 0) unsafeTestVec))
 
 % \end{code}
 
-% \begin{code}
+\begin{code}
 
-% data TheseTag
-%   = ThisTag
-%   | ThatTag
-%   | TheseTag
-%   deriving ( Eq, Ord, Show )
+data TheseTag
+  = ThisTag
+  | ThatTag
+  | TheseTag
+  deriving ( Eq, Ord, Show )
 
-% -- These with tagged constructors, so a function can only map to the same constructor as the argument it receives
-% data TaggedThese tag a b where
-%   This :: a -> TaggedThese 'ThisTag a b
-%   That :: b -> TaggedThese 'ThatTag a b
-%   These :: a -> b -> TaggedThese 'TheseTag a b
+-- These with tagged constructors, so a function can only map to the same constructor as the argument it receives
+data TaggedThese tag a b where
+  This :: a -> TaggedThese 'ThisTag a b
+  That :: b -> TaggedThese 'ThatTag a b
+  These :: a -> b -> TaggedThese 'TheseTag a b
 
-% \end{code}
+data Wrapper where
+  Wrapper :: forall a. (Bool -> TaggedThese a Int Char) %1 -> Wrapper
+
+wrapper =
+  withFresh
+    ( \(Fresh fresh :: Fresh a) ->
+        Wrapper @a
+          ( \b ->
+              if b then gcastWith (fresh @ThisTag) (This 0) else gcastWith (fresh @ThatTag) (That 'c')
+          )
+    )
+
+{-
+break :: ThisTag :~: ThatTag
+break =
+  wrapper & \(Wrapper (x :: Bool -> TaggedThese abba Int Char)) ->
+    let
+      t = x True :: TaggedThese abba Int Char
+      f = x False :: TaggedThese abba Int Char
+    in trans
+      ( case t of
+          This i -> Refl :: 'ThisTag :~: abba
+      )
+      ( _
+      )
+-}
+\end{code}
+
