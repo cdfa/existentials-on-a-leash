@@ -3,25 +3,26 @@
 
 todo: remove ghc-typelits-presburger ghc-typelits-knownnat if not needed
 -}
-
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE LinearTypes #-}
 {-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE LinearTypes #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures #-}
 -- These are only used for the examples, not required to use this trick in general
 {-# OPTIONS_GHC -fplugin Data.Type.Natural.Presburger.MinMaxSolver #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 
-import Prelude hiding (filter)
-import Unsafe.Coerce (unsafeCoerce)
 import Control.Lens as Lens
 import Data.Sized as Sized
 import GHC.TypeNats
---import Data.Type.Natural
-import Data.Kind
+import Unsafe.Coerce (unsafeCoerce)
+import Prelude hiding (filter)
+
+-- import Data.Type.Natural
+
 import Control.Subcategory
+import Data.Kind
 import Data.Type.Equality hiding (gcastWith)
 
 {- [markdown]
@@ -77,23 +78,26 @@ filter :: forall fresh a n. Fresh fresh %1 -> (a -> Bool) -> Vec n a -> Vec fres
 filter (Fresh fresh) p vec =
   case vec of
     VNil -> gcastWith (fresh @Zero) VNil
-    VCons x xs | p x ->
-      withFresh
-        (\(freshPredN :: Fresh predN) ->
-          gcastWith
-            (fresh @(Succ predN))
-            (VCons x (filter freshPredN p xs)))
+    VCons x xs
+      | p x ->
+          withFresh
+            ( \(freshPredN :: Fresh predN) ->
+                gcastWith
+                  (fresh @(Succ predN))
+                  (VCons x (filter freshPredN p xs))
+            )
     VCons _ xs ->
       withFresh
-        (\(freshNMinus1 :: Fresh n') ->
-          gcastWith (fresh @n') (filter freshNMinus1 p xs))
+        ( \(freshNMinus1 :: Fresh n') ->
+            gcastWith (fresh @n') (filter freshNMinus1 p xs)
+        )
 
 unsafeTestVec :: Vec (Succ (Succ n)) Int
 unsafeTestVec = VCons 0 $ VCons 1 undefined
 
 tryHead :: Vec n a %1 -> Maybe a
 tryHead VNil = Nothing
-tryHead (VCons x _) = Just x 
+tryHead (VCons x _) = Just x
 
 filterIsLazy = withFresh (\fresh -> tryHead (filter fresh (> 0) unsafeTestVec))
 
@@ -143,7 +147,7 @@ data TheseTag
   = ThisTag
   | ThatTag
   | TheseTag
-  deriving ( Eq, Ord, Show )
+  deriving (Eq, Ord, Show)
 
 -- These with tagged constructors, so a function can only map to the same constructor as the argument it receives
 data TaggedThese tag a b where
@@ -177,4 +181,3 @@ break =
       ( _
       )
 -}
-
