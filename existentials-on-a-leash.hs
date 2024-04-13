@@ -1,9 +1,8 @@
+{- [markdown]
 # Test
 
-<details>
-<summary>Pragma's and imports</summary>
-
-``` haskell
+todo: remove ghc-typelits-presburger ghc-typelits-knownnat if not needed
+-}
 
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -25,18 +24,16 @@ import Data.Kind
 import Control.Subcategory
 import Data.Type.Equality hiding (gcastWith)
 
-```
+{- [markdown]
 
-</details>
-
-``` haskell
+-}
 
 newtype Fresh a = Fresh (forall b. a :~: b)
 
 withFresh :: (forall a. Fresh a %1 -> r) %1 -> r
 withFresh f = f (Fresh $ unsafeCoerce Refl)
 
-```
+{- [markdown]
 
 `Fresh` is a proxy for a fresh type variable `a`.
 This is guaranteed by having `withFresh` be the only way to introduce this type (the constructor `Fresh` should not be exported), where `a` is existentially quantified.
@@ -48,8 +45,6 @@ Therefore, it is safe to substitute an arbitrary type `b` for `a`, which `bindFr
 However, you can do this only once.
 If `a` is bound multiple times, it may lead to type conflicts:
 
-% \begin{code}
-
 ```haskell
 conflict = withFresh $ \(fresh :: Fresh a) ->
   let
@@ -59,15 +54,13 @@ conflict = withFresh $ \(fresh :: Fresh a) ->
   in error "Int /= Char"
 ```
 
-% \end{code}
-
 To prevent this, we only allow using the `Fresh`-token once using a linear arrow in `withFresh`.
 
 This delayed binding of a type variable allows us to have "naked" existentially quantified types within the context of a function passed to `withFresh`.
 
 For example, we can write a lazy `filter` for length-indexed vectors:
 
-``` haskell
+-}
 
 -- | Linear version of Type.Equality.gcastWith
 gcastWith :: (a :~: b) %1 -> ((a ~ b) => r) %1 -> r
@@ -104,59 +97,84 @@ tryHead (VCons x _) = Just x
 
 filterIsLazy = withFresh (\fresh -> tryHead (filter fresh (> 0) unsafeTestVec))
 
-```
+-- >>> filterIsLazy
+-- Just 1
 
-> -- >>> filterIsLazy
-> -- Just 1
+{- [markdown]
 
-% \begin{code}
+-}
 
-% data Batching s a b r = forall n. KnownNat n => Batching (Sized s n a) (Sized s n b -> r)
+-- data Batching s a b r = forall n. KnownNat n => Batching (Sized s n a) (Sized s n b -> r)
 
-% request :: (Dom s a, Dom s b, CPointed s, CFoldable s) => a -> Batching s a b b
-% request a = Batching (singleton a) Sized.head
+-- request :: (Dom s a, Dom s b, CPointed s, CFoldable s) => a -> Batching s a b b
+-- request a = Batching (singleton a) Sized.head
 
-% instance Functor (Batching s a b) where
-%   fmap f (Batching as bsr) = Batching as (f . bsr)
+-- instance Functor (Batching s a b) where
+--   fmap f (Batching as bsr) = Batching as (f . bsr)
 
-% instance (Dom s a, CFreeMonoid s, Dom s b) => Applicative (Batching s a b) where
-%   pure x = Batching empty (const x)
-%   Batching as1 bsf <*> Batching as2 bsr = Batching (Sized.append as1 as2) $ \bs ->
-%     let
-%       (bs1, bs2) = Sized.splitAt (Sized.sLength as1) bs
-%     in
-%     _
+-- instance (Dom s a, CFreeMonoid s, Dom s b) => Applicative (Batching s a b) where
+--   pure x = Batching empty (const x)
+--   Batching as1 bsf <*> Batching as2 bsr = Batching (Sized.append as1 as2) $ \bs ->
+--     let
+--       (bs1, bs2) = Sized.splitAt (Sized.sLength as1) bs
+--     in
+--     _
 
-% newtype SizePreservingF g s a b n = SizePreservingF (Sized s n a -> g (Sized s n b))
+-- newtype SizePreservingF g s a b n = SizePreservingF (Sized s n a -> g (Sized s n b))
 
-% partsOf :: forall f s t a b n. Functor f
-%         => Fresh n
-%         -> Traversing (->) f s t a b
-%         -> LensLike f s t (Sized [] n a) (Sized [] n b)
-% partsOf fresh o f s =
-%   let --(t, (aVec, bVec)) = flip runState abList2 $ traverseOf o step s
-%     g :: forall z. Sized [] z a -> f (Sized [] z b)
-%     g as = innerCoerce (bindFresh fresh) (SizePreservingF f) & \(SizePreservingF h) -> h as
-%     x = g empty
-%     y = g $ singleton undefined
-%     t = undefined
-%   in t
+-- partsOf :: forall f s t a b n. Functor f
+--         => Fresh n
+--         -> Traversing (->) f s t a b
+--         -> LensLike f s t (Sized [] n a) (Sized [] n b)
+-- partsOf fresh o f s =
+--   let --(t, (aVec, bVec)) = flip runState abList2 $ traverseOf o step s
+--     g :: forall z. Sized [] z a -> f (Sized [] z b)
+--     g as = innerCoerce (bindFresh fresh) (SizePreservingF f) & \(SizePreservingF h) -> h as
+--     x = g empty
+--     y = g $ singleton undefined
+--     t = undefined
+--   in t
 
-% \end{code}
+{- [markdown]
 
-% \begin{code}
+-}
 
-% data TheseTag
-%   = ThisTag
-%   | ThatTag
-%   | TheseTag
-%   deriving ( Eq, Ord, Show )
+data TheseTag
+  = ThisTag
+  | ThatTag
+  | TheseTag
+  deriving ( Eq, Ord, Show )
 
-% -- These with tagged constructors, so a function can only map to the same constructor as the argument it receives
-% data TaggedThese tag a b where
-%   This :: a -> TaggedThese 'ThisTag a b
-%   That :: b -> TaggedThese 'ThatTag a b
-%   These :: a -> b -> TaggedThese 'TheseTag a b
+-- These with tagged constructors, so a function can only map to the same constructor as the argument it receives
+data TaggedThese tag a b where
+  This :: a -> TaggedThese 'ThisTag a b
+  That :: b -> TaggedThese 'ThatTag a b
+  These :: a -> b -> TaggedThese 'TheseTag a b
 
-% \end{code}
+data Wrapper where
+  Wrapper :: forall a. (Bool -> TaggedThese a Int Char) %1 -> Wrapper
+
+wrapper =
+  withFresh
+    ( \(Fresh fresh :: Fresh a) ->
+        Wrapper @a
+          ( \b ->
+              if b then gcastWith (fresh @ThisTag) (This 0) else gcastWith (fresh @ThatTag) (That 'c')
+          )
+    )
+
+{-
+break :: ThisTag :~: ThatTag
+break =
+  wrapper & \(Wrapper (x :: Bool -> TaggedThese abba Int Char)) ->
+    let
+      t = x True :: TaggedThese abba Int Char
+      f = x False :: TaggedThese abba Int Char
+    in trans
+      ( case t of
+          This i -> Refl :: 'ThisTag :~: abba
+      )
+      ( _
+      )
+-}
 

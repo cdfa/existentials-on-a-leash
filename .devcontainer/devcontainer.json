@@ -5,11 +5,11 @@
     "args": {
       "USER_UID": "${localEnv:USER_UID}",
       "USER_GID": "${localEnv:USER_GID}"
-    },
+    }
   },
   "mounts": [
     {
-      "source": "taking-existentials-on-a-leash-nix",
+      "source": "existentials-on-a-leash-nix",
       "target": "/nix",
       "type": "volume"
     }
@@ -30,14 +30,13 @@
         "mkhl.direnv",
         "haskell.haskell",
         "justusadam.language-haskell",
-        "dqisme.sync-scroll",
-      ],
+        "zhaouv.vscode-markdown-everywhere"
+      ]
     },
     "codespaces": {
       "openFiles": [
-        "existentials-on-a-leash.lhs",
-        "existentials-on-a-leash.md",
+        "existentials-on-a-leash.hs"
       ]
-    },
-  },
+    }
+  }
 }

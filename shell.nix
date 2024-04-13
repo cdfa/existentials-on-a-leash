@@ -42,8 +42,5 @@ pkgs.mkShell
 
     pkgs.cabal-install
     pkgs.nil
-    (pkgs.writeShellScriptBin
-      "build"
-      "${unlit}/bin/unlit --to=backtickfence --language=haskell --input=existentials-on-a-leash.lhs | ${pkgs.gnused}/bin/sed 's/^\\\\#/#/' > existentials-on-a-leash.md")
-  ];
+    ];
 }
