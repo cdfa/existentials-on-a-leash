@@ -5,6 +5,7 @@
         "Succ"
     ],
     "markdown-everywhere.preview-mode": "fenced",
+    "markdown-everywhere.auto-preview": ["haskell"],
     "editor.tokenColorCustomizations": {
         "[Default Dark+]": {
             "textMateRules": [
