@@ -41,25 +41,26 @@ todo: prisms for GADTs
 {-# LANGUAGE GHC2021 #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE ImpredicativeTypes #-}
+-- {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE LinearTypes #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# OPTIONS_GHC -Wall -Wno-missing-signatures #-}
+{-# OPTIONS_GHC -Wall -Wno-missing-signatures -XNoImplicitPrelude #-}
 -- These are only used for the examples with length-indexed vectors, not required to use this trick in general
-{-# OPTIONS_GHC -fplugin Data.Type.Natural.Presburger.MinMaxSolver #-}
-{-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
+-- {-# OPTIONS_GHC -fplugin Data.Type.Natural.Presburger.MinMaxSolver #-}
+-- {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 
-import Control.Lens as Lens
+import Control.Lens qualified as Lens
 import Data.Sized as Sized
 import GHC.TypeNats
+import Prelude.Linear
 import Unsafe.Coerce (unsafeCoerce)
-import Prelude hiding (filter)
+import Prelude qualified as NL
 
 -- import Data.Type.Natural
 
 import Control.Subcategory
 import Data.Kind
-import Data.Type.Equality hiding (gcastWith)
+import Data.Type.Equality
+import Data.Unrestricted.Linear
 
 {- [markdown]
 We can use the standard definition of length-indexed vectors:
@@ -143,8 +144,7 @@ As long as there only ever exists one `a ~ b`, it should then be safe to substit
 
 However, it is possible to get multiple *different* values of `f b` and until I tried it, I thought that this could lead to contradicting type equalities if `f` was a GADT.
 Let me show my attempt:
--}
-
+```haskell
 data GADT a where
   Int :: GADT Int
   Char :: GADT Char
@@ -162,8 +162,6 @@ wrapper =
           )
     )
 
-{- [markdown]
-```haskell
 conflict :: Int :~: Char
 conflict =
   wrapper & \(Wrapper @a (f :: Bool -> GADT a)) ->
@@ -210,8 +208,11 @@ We finally arrive at the real version of `Fresh` and `withFresh`:
 
 newtype Fresh a = Fresh (forall b. a :~: b)
 
-withFresh :: (forall a. Fresh a %1 -> r) %1 -> r
-withFresh f = f (Fresh $ unsafeCoerce Refl)
+withFresh :: (forall a. Fresh a %1 -> Ur r) %1 -> Ur r
+withFresh f = f $ Fresh NL.$ unsafeCoerce Refl
+
+castFresh :: forall b a r. Fresh a %1 -> ((a ~ b) => r) -> Ur r
+castFresh (Fresh (Refl :: a :~: b)) r = Ur r
 
 {- [markdown]
 The linear arrow `%1 ->` ensures that `Fresh $ unsafeCoerce Refl` is used exactly once in the function `f` (if the result of type `r` is completely evaluated).
@@ -247,29 +248,32 @@ conflict = withFresh $ \(fresh :: Fresh a) ->
 Now we can define a lazy version of `vecFromList`
 -}
 
--- | Linear version of Data.Type.Equality.gcastWith
-gcastWith :: (a :~: b) %1 -> ((a ~ b) => r) %1 -> r
-gcastWith Refl x = x
-
-lazyVecFromList :: Fresh n -> [a] -> Vec n a
-lazyVecFromList (Fresh fresh) [] = gcastWith (fresh @Zero) VNil
-lazyVecFromList (Fresh fresh) (a : as) =
+lazyVecFromList :: Fresh n %1 -> [a] -> Ur (Vec n a)
+lazyVecFromList fresh [] = castFresh @Zero fresh VNil
+lazyVecFromList fresh (a : as) =
   withFresh
     ( \(freshPredN :: Fresh predN) ->
-        gcastWith
-          (fresh @(Succ predN))
-          (VCons a (lazyVecFromList freshPredN as))
+        lazyVecFromList freshPredN as
+          & ( \(Ur asVec) ->
+                castFresh @(Succ predN) fresh (VCons a asVec)
+            )
     )
 
 unsafeTestList :: [Int]
 unsafeTestList = [0, undefined]
 
-tryHead :: Vec n a %1 -> Maybe a
+tryHead :: Vec n a -> Maybe a
 tryHead VNil = Nothing
 tryHead (VCons x _) = Just x
 
 lazyVecFromListIsLazy :: Maybe Int
-lazyVecFromListIsLazy = withFresh (\fresh -> tryHead (lazyVecFromList fresh unsafeTestList))
+lazyVecFromListIsLazy = unur $ withFresh (\fresh -> lift tryHead $ lazyVecFromList fresh unsafeTestList)
+
+-- lTest :: Int -> Fresh n ->  Int
+-- lTest x (Fresh f) = 3
+
+-- lTest2 :: Int %1 -> Int
+-- lTest2 x = withFresh (\f -> lTest x f)
 
 -- >>> lazyVecFromListIsLazy
 -- Just 0
@@ -280,7 +284,7 @@ We can't use the one we got as an argument, because we need it to cast `VCons a 
 
 I will admit that linear types are also not an ideal solution, both in theory and in practice.
 On the theoretical part, affine types would be much better suited, because an affine function arrow would allow the argument to not be used.
-Because linear types require that the argument is used exactly once, we need to ensure that the vector resulting from `lazyVecFromList` is used exactly once and hence `tryHead` needs to be linear as well.
+Because linear types require that the argument is used exactly once, we need to use `Ur` everywhere so the caller can use the returned value without restrictions.
 
 On the practical part, it's simply difficult to work with linear types at the moment because the implementation in GHC is still very "bare-bones".
 For those unaware, I'll name just a few issues:
@@ -288,24 +292,25 @@ For those unaware, I'll name just a few issues:
   * As you can see above, the error messages don't say exactly where something is wrong. Just that some value was not used linearly.
   * Multiplicity polymorphism is not reliable yet.
 
-Luckily, we can relieve users of functions that use this kind of existential quantification of dealing with linear types, by wrapping the functions in a GADT:
+todo: linear constraints
+Luckily, we can relieve users of functions that use this kind of existential quantification from dealing with linear types, by wrapping the functions in a GADT:
 -}
 
 -- data Exists f where
 --   Exists :: f a -> Exists f
 
-data VecFromList a where
-  VecFromList :: forall n a. ([a] -> Vec n a) %1 -> VecFromList a
+-- data VecFromList a where
+--   VecFromList :: forall n a. ([a] -> Vec n a) %1 -> VecFromList a
 
-lazyVecFromList' :: VecFromList a
-lazyVecFromList' = withFresh (\(fresh :: Fresh a) -> VecFromList (lazyVecFromList fresh))
+-- lazyVecFromList' :: VecFromList a
+-- lazyVecFromList' = withFresh (\(fresh :: Fresh a) -> VecFromList (lazyVecFromList fresh))
 
-tryHead' :: Vec n a -> Maybe a
-tryHead' VNil = Nothing
-tryHead' (VCons x _) = Just x
+-- tryHead' :: Vec n a -> Maybe a
+-- tryHead' VNil = Nothing
+-- tryHead' (VCons x _) = Just x
 
-unsafeListHead =
-  lazyVecFromList' & \(VecFromList vecFromList') -> tryHead' $ vecFromList' unsafeTestList
+-- unsafeListHead =
+--   lazyVecFromList' & \(VecFromList vecFromList') -> tryHead' $ vecFromList' unsafeTestList
 
 {- [markdown]
 Note that `tryHead'` is not linear.
@@ -350,7 +355,7 @@ data TheseTag
   = ThisTag
   | ThatTag
   | TheseTag
-  deriving (Eq, Ord, Show)
+  deriving (Show)
 
 -- These with tagged constructors, so a function can only map to the same constructor as the argument it receives
 data TaggedThese tag a b where
