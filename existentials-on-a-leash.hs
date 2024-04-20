@@ -37,13 +37,12 @@ We will reuse the example of length-indexed vectors from the proposal, but first
 todo: remove ghc-typelits-presburger ghc-typelits-knownnat if not needed
 todo: prisms for GADTs
 -}
-
 {-# LANGUAGE GHC2021 #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
--- {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE LinearTypes #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures -XNoImplicitPrelude #-}
+
 -- These are only used for the examples with length-indexed vectors, not required to use this trick in general
 -- {-# OPTIONS_GHC -fplugin Data.Type.Natural.Presburger.MinMaxSolver #-}
 -- {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
@@ -150,7 +149,7 @@ data GADT a where
   Char :: GADT Char
 
 data Wrapper where
-  Wrapper :: forall a. (Bool -> GADT a) %1 -> Wrapper
+  Wrapper :: forall a. (Bool -> GADT a) -> Wrapper
 
 wrapper :: Wrapper
 wrapper =
@@ -206,12 +205,13 @@ Which leaves me to show how to ensure the existential quantification witness is 
 We finally arrive at the real version of `Fresh` and `withFresh`:
 -}
 
+--todo: constructor should be hidden because otherwise it's Dupable
 newtype Fresh a = Fresh (forall b. a :~: b)
 
-withFresh :: (forall a. Fresh a %1 -> Ur r) %1 -> Ur r
+withFresh :: (forall a. Fresh a %1 -> r) %1 -> r
 withFresh f = f $ Fresh NL.$ unsafeCoerce Refl
 
-castFresh :: forall b a r. Fresh a %1 -> ((a ~ b) => r) -> Ur r
+castFresh :: forall b r a. Fresh a %1 -> ((a ~ b) => r) -> Ur r
 castFresh (Fresh (Refl :: a :~: b)) r = Ur r
 
 {- [markdown]
@@ -219,31 +219,38 @@ The linear arrow `%1 ->` ensures that `Fresh $ unsafeCoerce Refl` is used exactl
 
 If we try to use it more than once, we get a type error:
 ```haskell
-conflict = withFresh $ \(fresh :: Fresh a) ->
-  let
-    intEqualsA = sym fresh :: Int :~: a
-    aEqualsChar = fresh :: a :~: Char
-    Refl = trans intEqualsA aEqualsChar :: Int :~: Char
-  in error "Int /= Char"
+-- todo: rework to True ~ False
+conflict =
+  withFresh
+    ( \(fresh :: Fresh a) ->
+        castFresh @Int @(Int :~: a) fresh Refl & \(Ur intEqualsA) ->
+        castFresh @Char @(a :~: Char) fresh Refl & \(Ur aEqualsChar) ->
+          let
+            Refl = trans intEqualsA aEqualsChar :: Int :~: Char
+          in
+            error "Int /= Char"
+    )
 ```
 ```
 • Couldn't match type ‘Many’ with ‘One’
     arising from multiplicity of ‘fresh’
 • In the pattern: fresh :: Fresh a
-  In the second argument of ‘($)’, namely
-    ‘\ (fresh :: Fresh a)
-       -> let
-            intEqualsA = ...
-            ....
-          in error "Int /= Char"’
+  In the first argument of ‘withFresh’, namely
+    ‘(\ (fresh :: Fresh a)
+        -> castFresh @Int @(Int :~: a) fresh Refl
+             & \ (Ur intEqualsA)
+                 -> castFresh @Char @(a :~: Char) fresh Refl
+                      & \ (Ur aEqualsChar) -> ...)’
   In the expression:
     withFresh
-      $ \ (fresh :: Fresh a)
-          -> let
-               intEqualsA = ...
-               ....
-             in error "Int /= Char"
+      (\ (fresh :: Fresh a)
+         -> castFresh @Int @(Int :~: a) fresh Refl
+              & \ (Ur intEqualsA)
+                  -> castFresh @Char @(a :~: Char) fresh Refl
+                       & \ (Ur aEqualsChar) -> ...)
 ```
+Note that the constructor `Fresh` is linear (because it's a `newtype`).
+Therefore, pattern matching on `(Fresh f)` still requires linear use of `f`.
 
 Now we can define a lazy version of `vecFromList`
 -}
@@ -259,15 +266,12 @@ lazyVecFromList fresh (a : as) =
             )
     )
 
-unsafeTestList :: [Int]
-unsafeTestList = [0, undefined]
-
 tryHead :: Vec n a -> Maybe a
 tryHead VNil = Nothing
 tryHead (VCons x _) = Just x
 
 lazyVecFromListIsLazy :: Maybe Int
-lazyVecFromListIsLazy = unur $ withFresh (\fresh -> lift tryHead $ lazyVecFromList fresh unsafeTestList)
+lazyVecFromListIsLazy = unur $ withFresh (\fresh -> lift tryHead $ lazyVecFromList fresh [0, undefined])
 
 -- lTest :: Int -> Fresh n ->  Int
 -- lTest x (Fresh f) = 3
@@ -299,15 +303,77 @@ Luckily, we can relieve users of functions that use this kind of existential qua
 -- data Exists f where
 --   Exists :: f a -> Exists f
 
+type family ResultsIn f a where
+  ResultsIn f (f a) = f a
+  ResultsIn f (a -> b) = a -> ResultsIn f b
+  ResultsIn f a = f a
+
+newtype Exists a r = Exists (Fresh a %1 -> r)
+
+-- instance NL.Functor (Exists a) where
+--   fmap f (Exists e) = Exists (\fresh -> f $ unurResult $ e fresh)
+
+-- mapExists :: Unrestricting r => (r -> s) -> Exists a r -> Exists a s
+-- mapExists f (Exists e) = Exists $ liftToResult f e
+
+class Unrestricting r where
+  type UnuredResult r
+  type InUr r
+  type UnuredResult' r
+  type ReplaceResult b r
+  unurResult :: r %1 -> UnuredResult r
+  liftToResult :: (UnuredResult' r -> b) -> r %1 -> ReplaceResult b r
+
+instance Unrestricting (Ur r) where
+  type UnuredResult (Ur r) = r
+  type InUr (Ur r) = Ur r
+  type UnuredResult' (Ur r) = r
+  type ReplaceResult b (Ur r) = Ur b
+  unurResult = unur
+  liftToResult = lift
+
+instance (Unrestricting b) => Unrestricting (a -> b) where
+  type UnuredResult (a -> b) = a -> UnuredResult b
+  type InUr (a -> b) = a -> InUr b
+  type UnuredResult' (a -> b) = UnuredResult' b
+  type ReplaceResult c (a -> b) = a -> ReplaceResult c b
+  unurResult f a = unurResult $ f a
+  liftToResult mapR f a = liftToResult mapR $ f a
+
+instance Unrestricting b => Unrestricting (a %1 -> b) where
+  type UnuredResult (a %1 -> b) = a %1 -> UnuredResult b
+  type InUr (a %1 -> b) = a %1 -> InUr b
+  type UnuredResult' (a %1 -> b) = UnuredResult' b
+  type ReplaceResult c (a %1 -> b) = a %1 -> ReplaceResult c b
+  unurResult f a = unurResult $ f a
+  liftToResult mapR f a = liftToResult mapR $ f a
+
+-- getExists :: (UnurResult (ResultsIn Ur r)) => (forall a. Exists a r) -> UnuredResult (ResultsIn Ur r)
+-- getExists e = unurResult $ withFresh (e & \(Exists f) -> f)
+
+withExists :: (forall a. (Exists a (Ur r), r -> r')) -> r'
+withExists t = withFresh (\fresh -> t & \(Exists f, rTor') -> f fresh & \(Ur r) -> rTor' r)
+
+m :: (forall a. Fresh a %1 -> b -> Ur c) -> ((b -> c) -> d) -> d
+m f c = c (\b -> unur $ withFresh f b)
+
+lazyVecFromList2 :: Exists n ([a] -> Ur (Vec n a))
+lazyVecFromList2 = Exists lazyVecFromList
+
+lazyVecFromListIsLazy2 = m lazyVecFromList (\tov -> tryHead (tov []))
+
+-- lazyVecFromListIsLazy2 :: Maybe Int
+-- lazyVecFromListIsLazy2 =
+--   let
+--     x = lazyVecFromList2 :: forall n a. Exists n ([a] -> Vec n a)
+--   in
+--     (\vecFromList -> undefined $ tryHead $ vecFromList ['c', undefined]) (getExists x)
+
 -- data VecFromList a where
 --   VecFromList :: forall n a. ([a] -> Vec n a) %1 -> VecFromList a
 
 -- lazyVecFromList' :: VecFromList a
 -- lazyVecFromList' = withFresh (\(fresh :: Fresh a) -> VecFromList (lazyVecFromList fresh))
-
--- tryHead' :: Vec n a -> Maybe a
--- tryHead' VNil = Nothing
--- tryHead' (VCons x _) = Just x
 
 -- unsafeListHead =
 --   lazyVecFromList' & \(VecFromList vecFromList') -> tryHead' $ vecFromList' unsafeTestList

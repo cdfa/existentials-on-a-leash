@@ -2,7 +2,8 @@
     "haskell.formattingProvider": "fourmolu",
     "cSpell.words": [
         "forall",
-        "Succ"
+        "Succ",
+        "unur"
     ],
     "markdown-everywhere.preview-mode": "fenced",
     "markdown-everywhere.auto-preview": ["haskell"],
