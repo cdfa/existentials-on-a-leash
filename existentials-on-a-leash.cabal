@@ -1,0 +1,19 @@
+cabal-version: 3.0
+name: existentials-on-a-leash
+version: 0.1.0.0
+-- synopsis:
+description: This cabal file is only here to support single file haskell scripts in HLS.
+license: BSD-3-Clause
+license-file: LICENSE
+author: cdfa
+maintainer: 8250462+cdfa@users.noreply.github.com
+-- copyright:
+build-type: Simple
+
+common warnings
+  ghc-options: -Wall
+
+library
+  import: warnings
+  hs-source-dirs: src
+  default-language: GHC2024

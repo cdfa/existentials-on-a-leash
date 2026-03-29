@@ -1,3 +1,16 @@
+#!/usr/bin/env cabal
+{- cabal:
+ghc-options: -Wall
+default-language: GHC2024
+build-depends:
+  base,
+  linear-base,
+  lens,
+  fixed-vector ^>= 1.2.3.0,
+  ghc-typelits-presburger,
+  ghc-typelits-knownnat,
+-}
+
 {- [markdown]
 # Existentials on a leash
 
