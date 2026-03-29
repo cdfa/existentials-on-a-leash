@@ -37,29 +37,37 @@ We will reuse the example of length-indexed vectors from the proposal, but first
 todo: remove ghc-typelits-presburger ghc-typelits-knownnat if not needed
 todo: prisms for GADTs
 -}
-{-# LANGUAGE GHC2021 #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LiberalTypeSynonyms #-}
 {-# LANGUAGE LinearTypes #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# OPTIONS_GHC -Wall -Wno-missing-signatures -XNoImplicitPrelude #-}
+-- {-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# OPTIONS_GHC -Wall -Wno-missing-signatures #-}
 
 -- These are only used for the examples with length-indexed vectors, not required to use this trick in general
 -- {-# OPTIONS_GHC -fplugin Data.Type.Natural.Presburger.MinMaxSolver #-}
 -- {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 
+-- import Control.Functor.Linear hiding (lift)
+
+import Control.Applicative
 import Control.Lens qualified as Lens
-import Data.Sized as Sized
-import GHC.TypeNats
-import Prelude.Linear
-import Unsafe.Coerce (unsafeCoerce)
-import Prelude qualified as NL
-
--- import Data.Type.Natural
-
-import Control.Subcategory
+import Data.Function
+import Data.Functor.Compose
+import Data.Functor.Identity
 import Data.Kind
 import Data.Type.Equality
 import Data.Unrestricted.Linear
+import Data.Vector.Fixed
+import Data.Vector.Fixed.Boxed qualified as V
+import GHC.TypeNats
+import Prelude.Linear qualified as L
+import Unsafe.Coerce (unsafeCoerce)
+import Prelude
+
+-- import Data.Type.Natural
 
 {- [markdown]
 We can use the standard definition of length-indexed vectors:
@@ -122,7 +130,7 @@ Now, we need a way for `vecFromList` to choose a type for `n`.
 Since it is a concrete type (chosen by the caller according to GHC), our only option is `unsafeCoerce`.
 
 Putting the dangers of this approach aside for a moment, given a value of `Fresh n`, we should allow `n` to be coerced to some other type `b`, but in `vecFromList` we don't have values of type `n`, only `Vec n a`.
-We could define `castVec :: Fresh n -> Vec n a -> Vec n' a`, but ideally an existential types workaround would be specific to the example of length-indexed vectors.
+We could define `castVec :: Fresh n -> Vec n a -> Vec n' a`, but ideally an existential types workaround would not be specific to the example of length-indexed vectors.
 This can be accomplished by providing a type equality witness (from `Data.Type.Equality`) instead of a specific casting function.
 
 We arrive at:
@@ -141,6 +149,10 @@ Until we use the witness, no values of type `a` can exist because it was existen
 Types `f` that are parameterized by `a` can have values, but such values must be independent of `a` for the same reason.
 As long as there only ever exists one `a ~ b`, it should then be safe to substitute `a` for the `b` which is chosen.
 
+By definition of `forall`, a function `f` passed to `withFresh` must return a value of type `r`  for any given `Fresh a`.
+Since `withFresh` does not care about what type  `a` is instantiated with (any chosen type is equal to itself), it is safe to let `f` choose `a`, but only once.
+
+todo?
 However, it is possible to get multiple *different* values of `f b` and until I tried it, I thought that this could lead to contradicting type equalities if `f` was a GADT.
 Let me show my attempt:
 ```haskell
@@ -202,17 +214,43 @@ In the pattern match of `Int`, GHC does not generate the constraint `Int ~ a`, b
 I'm not sure why it does this, but I'm happy it does because otherwise I don't think I can make this trick safe.
 
 Which leaves me to show how to ensure the existential quantification witness is used at most once: linear types.
-We finally arrive at the real version of `Fresh` and `withFresh`:
+We finally arrive at the real definition of `Fresh` and `withFresh`:
 -}
 
---todo: constructor should be hidden because otherwise it's Dupable
 newtype Fresh a = Fresh (forall b. a :~: b)
 
 withFresh :: (forall a. Fresh a %1 -> r) %1 -> r
-withFresh f = f $ Fresh NL.$ unsafeCoerce Refl
+withFresh f = f L.$ Fresh $ unsafeCoerce Refl
+
+byFresh :: forall b a. Fresh a %1 -> Ur (a :~: b)
+byFresh (Fresh (Refl :: a :~: b)) = Ur Refl
 
 castFresh :: forall b r a. Fresh a %1 -> ((a ~ b) => r) -> Ur r
 castFresh (Fresh (Refl :: a :~: b)) r = Ur r
+
+{-
+For single focus (?):
+Fuck. To be a well-formed optic, it needs to return p s (f t).
+Fresh can't be passed as argument to the optic, because it would have to travel through all precomposed optics, which aren't linear. The optic can't return something like Ur (p a (f t)) either because it needs s before it can cast n and produce Ur.
+Fresh also can't be passed through s, because it would have to pass through the entire optics chain.
+Fresh also can't be passed as a target (Fresh n -> Ur (f t)), because the optic needs to return p s (f t) with the f on top of the p return type. Any elimination function for some special "existential optic", would have to pass some p s (f t) to a real elimination function, which leaves no space for an Ur on top of the f.
+Maybe Compose Ur with f?
+
+For multiple foci:
+2 kinds of foci: input and output.
+Both have complete maps (as sigma type) of index %1 -> focus.
+Only input focus also contains a value retrievable without index.
+This okay, because input focus is never passed as output.
+Special function to create read-only optic which just unsafecoerce's, because outputs are never read.
+
+No. No asymmetric optics.
+
+Just hide index. Force pure or index-preserving lift with custom f propagated to elim with profunctor.
+Don't know about aligning yet.
+
+Class for which functors Preserving can be run under?
+Similar for profunctor?
+-}
 
 {- [markdown]
 The linear arrow `%1 ->` ensures that `Fresh $ unsafeCoerce Refl` is used exactly once in the function `f` (if the result of type `r` is completely evaluated).
@@ -255,15 +293,15 @@ Therefore, pattern matching on `(Fresh f)` still requires linear use of `f`.
 Now we can define a lazy version of `vecFromList`
 -}
 
-lazyVecFromList :: Fresh n %1 -> [a] -> Ur (Vec n a)
-lazyVecFromList fresh [] = castFresh @Zero fresh VNil
-lazyVecFromList fresh (a : as) =
+lazyVecFromList :: [a] -> Fresh n %1 -> Ur (Vec n a)
+lazyVecFromList [] fresh = castFresh @Zero fresh VNil
+lazyVecFromList (a : as) fresh =
   withFresh
     ( \(freshPredN :: Fresh predN) ->
-        lazyVecFromList freshPredN as
-          & ( \(Ur asVec) ->
-                castFresh @(Succ predN) fresh (VCons a asVec)
-            )
+        lazyVecFromList as freshPredN
+          L.& ( \(Ur asVec) ->
+                  castFresh @(Succ predN) fresh (VCons a asVec)
+              )
     )
 
 tryHead :: Vec n a -> Maybe a
@@ -271,13 +309,7 @@ tryHead VNil = Nothing
 tryHead (VCons x _) = Just x
 
 lazyVecFromListIsLazy :: Maybe Int
-lazyVecFromListIsLazy = unur $ withFresh (\fresh -> lift tryHead $ lazyVecFromList fresh [0, undefined])
-
--- lTest :: Int -> Fresh n ->  Int
--- lTest x (Fresh f) = 3
-
--- lTest2 :: Int %1 -> Int
--- lTest2 x = withFresh (\f -> lTest x f)
+lazyVecFromListIsLazy = unur L.$ withFresh (lift tryHead L.. lazyVecFromList [0, undefined])
 
 -- >>> lazyVecFromListIsLazy
 -- Just 0
@@ -297,95 +329,123 @@ For those unaware, I'll name just a few issues:
   * Multiplicity polymorphism is not reliable yet.
 
 todo: linear constraints
-Luckily, we can relieve users of functions that use this kind of existential quantification from dealing with linear types, by wrapping the functions in a GADT:
+We can recover the standard form of `vecFromList` though:
 -}
 
--- data Exists f where
---   Exists :: f a -> Exists f
-
-type family ResultsIn f a where
-  ResultsIn f (f a) = f a
-  ResultsIn f (a -> b) = a -> ResultsIn f b
-  ResultsIn f a = f a
-
-newtype Exists a r = Exists (Fresh a %1 -> r)
-
--- instance NL.Functor (Exists a) where
---   fmap f (Exists e) = Exists (\fresh -> f $ unurResult $ e fresh)
-
--- mapExists :: Unrestricting r => (r -> s) -> Exists a r -> Exists a s
--- mapExists f (Exists e) = Exists $ liftToResult f e
-
-class Unrestricting r where
-  type UnuredResult r
-  type InUr r
-  type UnuredResult' r
-  type ReplaceResult b r
-  unurResult :: r %1 -> UnuredResult r
-  liftToResult :: (UnuredResult' r -> b) -> r %1 -> ReplaceResult b r
-
-instance Unrestricting (Ur r) where
-  type UnuredResult (Ur r) = r
-  type InUr (Ur r) = Ur r
-  type UnuredResult' (Ur r) = r
-  type ReplaceResult b (Ur r) = Ur b
-  unurResult = unur
-  liftToResult = lift
-
-instance (Unrestricting b) => Unrestricting (a -> b) where
-  type UnuredResult (a -> b) = a -> UnuredResult b
-  type InUr (a -> b) = a -> InUr b
-  type UnuredResult' (a -> b) = UnuredResult' b
-  type ReplaceResult c (a -> b) = a -> ReplaceResult c b
-  unurResult f a = unurResult $ f a
-  liftToResult mapR f a = liftToResult mapR $ f a
-
-instance Unrestricting b => Unrestricting (a %1 -> b) where
-  type UnuredResult (a %1 -> b) = a %1 -> UnuredResult b
-  type InUr (a %1 -> b) = a %1 -> InUr b
-  type UnuredResult' (a %1 -> b) = UnuredResult' b
-  type ReplaceResult c (a %1 -> b) = a %1 -> ReplaceResult c b
-  unurResult f a = unurResult $ f a
-  liftToResult mapR f a = liftToResult mapR $ f a
-
--- getExists :: (UnurResult (ResultsIn Ur r)) => (forall a. Exists a r) -> UnuredResult (ResultsIn Ur r)
--- getExists e = unurResult $ withFresh (e & \(Exists f) -> f)
-
-withExists :: (forall a. (Exists a (Ur r), r -> r')) -> r'
-withExists t = withFresh (\fresh -> t & \(Exists f, rTor') -> f fresh & \(Ur r) -> rTor' r)
-
-m :: (forall a. Fresh a %1 -> b -> Ur c) -> ((b -> c) -> d) -> d
-m f c = c (\b -> unur $ withFresh f b)
-
-lazyVecFromList2 :: Exists n ([a] -> Ur (Vec n a))
-lazyVecFromList2 = Exists lazyVecFromList
-
-lazyVecFromListIsLazy2 = m lazyVecFromList (\tov -> tryHead (tov []))
-
--- lazyVecFromListIsLazy2 :: Maybe Int
--- lazyVecFromListIsLazy2 =
---   let
---     x = lazyVecFromList2 :: forall n a. Exists n ([a] -> Vec n a)
---   in
---     (\vecFromList -> undefined $ tryHead $ vecFromList ['c', undefined]) (getExists x)
-
--- data VecFromList a where
---   VecFromList :: forall n a. ([a] -> Vec n a) %1 -> VecFromList a
-
--- lazyVecFromList' :: VecFromList a
--- lazyVecFromList' = withFresh (\(fresh :: Fresh a) -> VecFromList (lazyVecFromList fresh))
-
--- unsafeListHead =
---   lazyVecFromList' & \(VecFromList vecFromList') -> tryHead' $ vecFromList' unsafeTestList
+lazyVecFromList2 :: [a] -> SomeVec a
+lazyVecFromList2 xs = unur L.$ withFresh (lift SomeVec L.. lazyVecFromList xs)
 
 {- [markdown]
-Note that `tryHead'` is not linear.
+Now, the use of linear types in the implementation of `lazyVecFromList2` is completely hidden from the user.
+
+## Optics for existentially quantified foci
+
+Existentials on a leash find a second application in optics with existentially quantified foci.
+
 -}
 
--- data Batching s a b r = forall n. KnownNat n => Batching (Sized s n a) (Sized s n b -> r)
+instance Consumable (a :~: b) where
+  consume Refl = ()
 
--- request :: (Dom s a, Dom s b, CPointed s, CFoldable s) => a -> Batching s a b b
--- request a = Batching (singleton a) Sized.head
+instance Consumable (Fresh a) where
+  consume (Fresh r) = consume r
+
+type Exists a b = Fresh a %1 -> b
+
+newtype ExistsF a b = ExistsF (Exists a (Ur b))
+
+data Market a b s t = Market (b -> t) (s -> Either t a)
+
+instance Lens.Profunctor (Market a b) where
+  dimap f g (Market bt seta) = Market (g . bt) (either (Left . g) Right . seta . f)
+  {-# INLINE dimap #-}
+  lmap f (Market bt seta) = Market bt (seta . f)
+  {-# INLINE lmap #-}
+  rmap f (Market bt seta) = Market (f . bt) (either (Left . f) Right . seta)
+  {-# INLINE rmap #-}
+
+newtype Inner a = Inner a
+newtype Outer a = Outer a
+
+-- -- newtype InnerPreserving f na nb = InnerPreserving (forall x. m x -> f (n x))
+
+-- type family Preserving n f na nb a where
+--   Preserving n f na nb (Inner b) = na n -> f (nb n)
+--   Preserving n f na nb (Outer b) = Exists n (Ur (f b))
+
+-- newtype PreservingF n f na nb a = PreservingF (Preserving n f na nb a)
+
+-- -- instance Functor f => Functor (InnerPreserving f m n) where
+-- --   fmap f (Inner i) =
+
+-- newtype ExistentialProfunctor n p a b = ExistentialProfunctor (p a (Fresh n %1 -> Ur b))
+
+-- instance (Lens.Profunctor p) => Lens.Profunctor (ExistentialProfunctor n p) where
+--   lmap f (ExistentialProfunctor ep) = ExistentialProfunctor (Lens.lmap f ep)
+--   rmap f (ExistentialProfunctor ep) = ExistentialProfunctor (Lens.rmap (lift f L..) ep)
+
+data Some a where
+  Some :: forall a x. a x -> Some a
+
+data Preserving p f a b c = Preserving (forall x. p (a x) (f (b x))) (f c)
+
+instance (Functor f) => Functor (Preserving p f a b)
+
+newtype Flip f a b = Flip (f b a)
+
+getFlip (Flip fba) = fba
+
+-- type ExistentialOptic (p :: Type -> Type -> Type) (f :: Type -> Type) g s (t :: Type) a b = Lens.Optic (PreservingProfunctor p f a b) f s t (Some a) (Some b)
+
+partsOf
+  :: (Functor f)
+  => Lens.Over (->) (Batching a b) s t a b
+  -> Lens.LensLike (Preserving (->) f (Flip V.Vec a) (Flip V.Vec b)) s t () ()
+partsOf o f = batching o $ \as ->
+  let
+    Preserving as2fbs _ = f () -- returned f () can be ignored because the only way to create a Preserving is pure, which uses f's pure and pure f <*> pure x = pure (f x) (homomorphism law)
+  in
+    Preserving as2fbs . fmap getFlip . as2fbs $ Flip as
+
+-- -- No Fresh in -> No foci values, no fresh out
+-- -- Fresh in -> real foci values, no fresh out
+
+-- elimExistentialOptic :: (Lens.Optic (->) (PreservingF n f na nb) (Outer s) (Outer t) (Inner (na n)) (Inner (nb n)) -> r) -> ExistentialOptic n (->) f s t (na n) (nb n) -> r
+-- elimExistentialOptic elim o = elim (\(ExistentialProfunctor ep) -> _)
+
+batching :: (Functor f) => Lens.LensLike (Batching a b) s t a b -> (forall n. V.Vec n a -> f (V.Vec n b)) -> s -> f t
+batching o f = runBatching f . Lens.traverseOf o request
+
+-- partsOf :: Lens.Traversing (->) f s t a b -> Lens.LensLike (->)
+
+-- _SomeVec :: Lens.Prism (forall m. Exists m (SomeVec a)) (Exists n (SomeVec b)) (Vec n a) (Vec n b)
+_SomeVec = undefined
+
+{- [markdown]
+
+-}
+
+data Batching rq rs r = forall n. (KnownNat n) => Batching (V.Vec n rq) (V.Vec n rs -> r)
+
+runBatching'
+  :: (Functor f)
+  => Exists
+      n
+      ( (V.Vec n rq -> f (V.Vec n rs))
+        -> Batching rq rs t
+        -> Ur (f t)
+      )
+runBatching' fresh f (Batching (rqs :: V.Vec n1 rq) rssToR) = castFresh @n1 fresh (rssToR <$> f rqs)
+
+runBatching
+  :: (Functor f)
+  => (forall n. V.Vec n rq -> f (V.Vec n rs))
+  -> Batching rq rs t
+  -> f t
+runBatching f (Batching (rqs :: V.Vec n1 rq) rssToR) = rssToR <$> f rqs
+
+request :: a -> Batching a b b
+request a = Batching (mk1 a) Data.Vector.Fixed.head
 
 -- instance Functor (Batching s a b) where
 --   fmap f (Batching as bsr) = Batching as (f . bsr)
@@ -397,22 +457,6 @@ Note that `tryHead'` is not linear.
 --       (bs1, bs2) = Sized.splitAt (Sized.sLength as1) bs
 --     in
 --     _
-
--- newtype SizePreservingF g s a b n = SizePreservingF (Sized s n a -> g (Sized s n b))
-
--- partsOf :: forall f s t a b n. Functor f
---         => Fresh n
---         -> Traversing (->) f s t a b
---         -> LensLike f s t (Sized [] n a) (Sized [] n b)
--- partsOf fresh o f s =
---   let --(t, (aVec, bVec)) = flip runState abList2 $ traverseOf o step s
---     g :: forall z. Sized [] z a -> f (Sized [] z b)
---     g as = innerCoerce (bindFresh fresh) (SizePreservingF f) & \(SizePreservingF h) -> h as
---     x = g empty
---     y = g $ singleton undefined
---     t = undefined
---   in t
-
 {- [markdown]
 
 -}
