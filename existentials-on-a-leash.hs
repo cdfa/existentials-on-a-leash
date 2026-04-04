@@ -1,4 +1,3 @@
-#!/usr/bin/env cabal
 {- cabal:
 ghc-options: -Wall
 default-language: GHC2024
@@ -6,11 +5,11 @@ build-depends:
   base,
   linear-base,
   lens,
-  fixed-vector ^>= 1.2.3.0,
-  ghc-typelits-presburger,
+  -- ghc-typelits-presburger,
   ghc-typelits-knownnat,
+  type-natural,
+  equational-reasoning,
 -}
-
 {- [markdown]
 # Existentials on a leash
 
@@ -55,7 +54,6 @@ todo: prisms for GADTs
 {-# LANGUAGE LiberalTypeSynonyms #-}
 {-# LANGUAGE LinearTypes #-}
 {-# LANGUAGE TypeFamilies #-}
--- {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures #-}
 
@@ -73,9 +71,6 @@ import Data.Functor.Identity
 import Data.Kind
 import Data.Type.Equality
 import Data.Unrestricted.Linear
-import Data.Vector.Fixed
-import Data.Vector.Fixed.Boxed qualified as V
-import GHC.TypeNats
 import Prelude.Linear qualified as L
 import Unsafe.Coerce (unsafeCoerce)
 import Prelude
@@ -306,7 +301,9 @@ Therefore, pattern matching on `(Fresh f)` still requires linear use of `f`.
 Now we can define a lazy version of `vecFromList`
 -}
 
-lazyVecFromList :: [a] -> Fresh n %1 -> Ur (Vec n a)
+type Exists a b = Fresh a %1 -> Ur b
+
+lazyVecFromList :: [a] -> Exists n (Vec n a)
 lazyVecFromList [] fresh = castFresh @Zero fresh VNil
 lazyVecFromList (a : as) fresh =
   withFresh
@@ -357,16 +354,6 @@ Existentials on a leash find a second application in optics with existentially q
 
 -}
 
-instance Consumable (a :~: b) where
-  consume Refl = ()
-
-instance Consumable (Fresh a) where
-  consume (Fresh r) = consume r
-
-type Exists a b = Fresh a %1 -> b
-
-newtype ExistsF a b = ExistsF (Exists a (Ur b))
-
 data Market a b s t = Market (b -> t) (s -> Either t a)
 
 instance Lens.Profunctor (Market a b) where
@@ -377,88 +364,56 @@ instance Lens.Profunctor (Market a b) where
   rmap f (Market bt seta) = Market (f . bt) (either (Left . f) Right . seta)
   {-# INLINE rmap #-}
 
-newtype Inner a = Inner a
-newtype Outer a = Outer a
+-- newt Compose f g
 
--- -- newtype InnerPreserving f na nb = InnerPreserving (forall x. m x -> f (n x))
-
--- type family Preserving n f na nb a where
---   Preserving n f na nb (Inner b) = na n -> f (nb n)
---   Preserving n f na nb (Outer b) = Exists n (Ur (f b))
-
--- newtype PreservingF n f na nb a = PreservingF (Preserving n f na nb a)
-
--- -- instance Functor f => Functor (InnerPreserving f m n) where
--- --   fmap f (Inner i) =
-
--- newtype ExistentialProfunctor n p a b = ExistentialProfunctor (p a (Fresh n %1 -> Ur b))
-
--- instance (Lens.Profunctor p) => Lens.Profunctor (ExistentialProfunctor n p) where
---   lmap f (ExistentialProfunctor ep) = ExistentialProfunctor (Lens.lmap f ep)
---   rmap f (ExistentialProfunctor ep) = ExistentialProfunctor (Lens.rmap (lift f L..) ep)
-
-data Some a where
-  Some :: forall a x. a x -> Some a
-
-data Preserving p f a b c = Preserving (forall x. p (a x) (f (b x))) (f c)
-
-instance (Functor f) => Functor (Preserving p f a b)
-
-newtype Flip f a b = Flip (f b a)
-
-getFlip (Flip fba) = fba
-
--- type ExistentialOptic (p :: Type -> Type -> Type) (f :: Type -> Type) g s (t :: Type) a b = Lens.Optic (PreservingProfunctor p f a b) f s t (Some a) (Some b)
+(<.<) :: Lens.LensLike f s t a b -> (Fresh n %1 -> Lens.LensLike (Compose Ur f) a b u v) -> Fresh n %1 -> Lens.LensLike (Compose Ur f) s t u v
+(<.<) o1 o2 fresh f = o2 fresh f L.& _
 
 partsOf
   :: (Functor f)
-  => Lens.Over (->) (Batching a b) s t a b
-  -> Lens.LensLike (Preserving (->) f (Flip V.Vec a) (Flip V.Vec b)) s t () ()
-partsOf o f = batching o $ \as ->
-  let
-    Preserving as2fbs _ = f () -- returned f () can be ignored because the only way to create a Preserving is pure, which uses f's pure and pure f <*> pure x = pure (f x) (homomorphism law)
-  in
-    Preserving as2fbs . fmap getFlip . as2fbs $ Flip as
+  => Exists
+       n
+       ( Lens.LensLike (Batching a b) s t a b
+         -> Lens.LensLike f s t (Vec m a) (Vec m b)
+       )
+-- partsOf fresh o f = Ur $ batching o $ \as -> Compose $ castFresh fresh (f as)
+partsOf fresh =  _ (castFresh fresh (f _)) L.& \(Ur s) -> _ s
 
--- -- No Fresh in -> No foci values, no fresh out
--- -- Fresh in -> real foci values, no fresh out
-
--- elimExistentialOptic :: (Lens.Optic (->) (PreservingF n f na nb) (Outer s) (Outer t) (Inner (na n)) (Inner (nb n)) -> r) -> ExistentialOptic n (->) f s t (na n) (nb n) -> r
--- elimExistentialOptic elim o = elim (\(ExistentialProfunctor ep) -> _)
-
-batching :: (Functor f) => Lens.LensLike (Batching a b) s t a b -> (forall n. V.Vec n a -> f (V.Vec n b)) -> s -> f t
+batching :: (Functor f) => Lens.LensLike (Batching a b) s t a b -> (forall n. Vec n a -> f (Vec n b)) -> s -> f t
 batching o f = runBatching f . Lens.traverseOf o request
-
--- partsOf :: Lens.Traversing (->) f s t a b -> Lens.LensLike (->)
-
--- _SomeVec :: Lens.Prism (forall m. Exists m (SomeVec a)) (Exists n (SomeVec b)) (Vec n a) (Vec n b)
-_SomeVec = undefined
 
 {- [markdown]
 
 -}
 
-data Batching rq rs r = forall n. (KnownNat n) => Batching (V.Vec n rq) (V.Vec n rs -> r)
+data Batching rq rs r = forall n. Batching (Vec n rq) (Vec n rs -> r)
 
-runBatching'
-  :: (Functor f)
-  => Exists
-      n
-      ( (V.Vec n rq -> f (V.Vec n rs))
-        -> Batching rq rs t
-        -> Ur (f t)
-      )
-runBatching' fresh f (Batching (rqs :: V.Vec n1 rq) rssToR) = castFresh @n1 fresh (rssToR <$> f rqs)
+-- runBatching'(KnownNat n) =>
+--   :: (Functor f)
+--   => (Vec (Existential n) rq -> f (Vec (Existential n) rs))
+--   -> Batching rq rs t
+--   -> f t
+-- runBatching' fresh f (Batching (rqs :: Vec n1 rq) rssToR) = castFresh @n1 fresh (rssToR <$> f rqs)
 
 runBatching
   :: (Functor f)
-  => (forall n. V.Vec n rq -> f (V.Vec n rs))
+  => (forall n. Vec n rq -> f (Vec n rs))
   -> Batching rq rs t
   -> f t
-runBatching f (Batching (rqs :: V.Vec n1 rq) rssToR) = rssToR <$> f rqs
+runBatching f (Batching (rqs :: Vec n1 rq) rssToR) = rssToR <$> f rqs
 
 request :: a -> Batching a b b
-request a = Batching (mk1 a) Data.Vector.Fixed.head
+request a = Batching (VCons a VNil) vHead
+
+vHead :: Vec (Succ n) a -> a
+vHead (VCons a _) = a
+
+_head :: Lens.LensLike' f (Vec (Succ n) a) a
+_head = _
+
+toList :: Vec n a -> [a]
+toList VNil = []
+toList (VCons a as) = a : toList as
 
 -- instance Functor (Batching s a b) where
 --   fmap f (Batching as bsr) = Batching as (f . bsr)
@@ -481,7 +436,7 @@ data TheseTag
   deriving (Show)
 
 -- These with tagged constructors, so a function can only map to the same constructor as the argument it receives
-data TaggedThese tag a b where
-  This :: a -> TaggedThese 'ThisTag a b
-  That :: b -> TaggedThese 'ThatTag a b
-  These :: a -> b -> TaggedThese 'TheseTag a b
+data TaggedThese a b tag where
+  This :: a -> TaggedThese a b 'ThisTag
+  That :: b -> TaggedThese a b 'ThatTag
+  These :: a -> b -> TaggedThese a b 'TheseTag
