@@ -1,3 +1,9 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE LiberalTypeSynonyms #-}
+{-# LANGUAGE LinearTypes #-}
+{-# LANGUAGE TypeAbstractions #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 {- cabal:
 ghc-options: -Wall
 default-language: GHC2024
@@ -5,10 +11,23 @@ build-depends:
   base,
   linear-base,
   lens,
+  batching,
+  short-vec,
   -- ghc-typelits-presburger,
   ghc-typelits-knownnat,
   type-natural,
   equational-reasoning,
+-}
+{- project:
+with-compiler: ghc-9.12.2
+
+semaphore: True
+
+allow-newer:
+  base,
+  primitive,
+  containers,
+  deepseq,
 -}
 {- [markdown]
 # Existentials on a leash
@@ -46,36 +65,24 @@ As of GHC 9.10, GHC only supports 2 limited ways of existentially quantifying ty
 [A proposal](https://github.com/goldfirere/ghc-proposals/blob/existentials/proposals/0473-existentials.rst) for adding existential types to GHC was made a while ago, but the author is now prioritizing other work.
 We will reuse the example of length-indexed vectors from the proposal, but first, the language extensions and imports used in this article:
 
-todo: remove ghc-typelits-presburger ghc-typelits-knownnat if not needed
 todo: prisms for GADTs
 -}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE LiberalTypeSynonyms #-}
-{-# LANGUAGE LinearTypes #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE NoImplicitPrelude #-}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures #-}
 
--- These are only used for the examples with length-indexed vectors, not required to use this trick in general
--- {-# OPTIONS_GHC -fplugin Data.Type.Natural.Presburger.MinMaxSolver #-}
--- {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
-
--- import Control.Functor.Linear hiding (lift)
-
 import Control.Applicative
+import Control.Batching
+import Control.Functor.Linear qualified as Linear.Control
 import Control.Lens qualified as Lens
 import Data.Function
-import Data.Functor.Compose
+import Data.Functor ((<&>))
 import Data.Functor.Identity
 import Data.Kind
 import Data.Type.Equality
 import Data.Unrestricted.Linear
+import Data.Vec.Short qualified as V
 import Prelude.Linear qualified as L
 import Unsafe.Coerce (unsafeCoerce)
 import Prelude
-
--- import Data.Type.Natural
 
 {- [markdown]
 We can use the standard definition of length-indexed vectors:
@@ -354,80 +361,86 @@ Existentials on a leash find a second application in optics with existentially q
 
 -}
 
-data Market a b s t = Market (b -> t) (s -> Either t a)
+batching
+  :: (Functor f)
+  => Lens.LensLike (Batching a b) s t a b
+  -> (forall n. V.Vec n a -> f (V.Vec n b))
+  -> s
+  -> f t
+batching o f = runBatching (fmap V.rev . f . V.rev) . Lens.traverseOf o request -- The Vec from `runBatching` is reversed for some reason.
 
-instance Lens.Profunctor (Market a b) where
-  dimap f g (Market bt seta) = Market (g . bt) (either (Left . g) Right . seta . f)
-  {-# INLINE dimap #-}
-  lmap f (Market bt seta) = Market bt (seta . f)
-  {-# INLINE lmap #-}
-  rmap f (Market bt seta) = Market (f . bt) (either (Left . f) Right . seta)
-  {-# INLINE rmap #-}
+type ApplyList :: forall k l m. (k -> l) -> [k] -> m
+type family ApplyList f xs where
+  ApplyList f '[] = f
+  ApplyList f '[x] = f x -- not sure why this is needed
+  ApplyList f (x : xs) = ApplyList (f x) xs
 
--- newt Compose f g
+data Witness x = Witness -- hidden
 
-(<.<) :: Lens.LensLike f s t a b -> (Fresh n %1 -> Lens.LensLike (Compose Ur f) a b u v) -> Fresh n %1 -> Lens.LensLike (Compose Ur f) s t u v
-(<.<) o1 o2 fresh f = o2 fresh f L.& _
+data Some f xs where
+  Some :: Witness x %1 -> ApplyList (f x) xs -> Some f xs
+
+withWitness
+  :: forall h f g xs ys a
+   . (Functor h)
+  => (forall x. Witness x %1 -> ApplyList (f x) xs -> h (Some g ys))
+  -> ApplyList (f a) xs
+  -> h (ApplyList (g a) ys)
+withWitness f x = f @a Witness x <&> \(Some Witness y) -> unsafeCoerce y
+
+expose
+  :: forall h f g xs ys x
+   . (Functor h)
+  => (Some f xs %1 -> h (Some g ys)) -> ApplyList (f x) xs -> h (ApplyList (g x) ys)
+expose f = withWitness @_ @f @g @xs @ys @x $ \w x -> f (Some w x)
+
+hide
+  :: forall h f g xs ys
+   . (Linear.Control.Functor h, Functor h)
+  => (forall x. ApplyList (f x) xs -> h (ApplyList (g x) ys))
+  -> Some f xs
+  %1 -> h (Some g ys)
+hide f (Some @x w x) = Linear.Control.fmap (\(Ur y) -> Some w y) L.$ Ur <$> f @x x
 
 partsOf
   :: (Functor f)
-  => Exists
-       n
-       ( Lens.LensLike (Batching a b) s t a b
-         -> Lens.LensLike f s t (Vec m a) (Vec m b)
-       )
--- partsOf fresh o f = Ur $ batching o $ \as -> Compose $ castFresh fresh (f as)
-partsOf fresh =  _ (castFresh fresh (f _)) L.& \(Ur s) -> _ s
+  => Lens.LensLike (Batching a b) s t a b -> (Some V.Vec '[a] %1 -> f (Some V.Vec '[b])) -> s -> f t
+partsOf o f = batching o $ expose f
 
-batching :: (Functor f) => Lens.LensLike (Batching a b) s t a b -> (forall n. Vec n a -> f (Vec n b)) -> s -> f t
-batching o f = runBatching f . Lens.traverseOf o request
+pTraverseOf
+  :: forall xs ys h f g s t
+   . (Applicative h, Linear.Control.Functor h)
+  => (forall m. (Applicative m) => (Some f xs %1 -> m (Some g ys)) -> s -> m t)
+  -> (forall x. ApplyList (f x) xs -> h (ApplyList (g x) ys))
+  -> s
+  -> h t
+pTraverseOf o f = o $ hide $ \ @n x -> f @n x
+
+demo :: [Either Bool String]
+demo =
+  runIdentity $
+    pTraverseOf
+      (partsOf (Lens.traversed . Lens._Right))
+      (\letters -> Identity $ fmap (const $ foldMap (: []) letters) letters)
+      [Left True, Right 'h', Left False, Right 'i']
+
+-- >>> demo
+-- This crashes in HLS and GHCi. Will create an issue later.
+
+main = print demo
+
+-- prints [Left True,Right "hi",Left False,Right "hi"]
 
 {- [markdown]
 
 -}
 
-data Batching rq rs r = forall n. Batching (Vec n rq) (Vec n rs -> r)
+-- instance Show a => Show (Vec n a ) where
+--   show (VNil) = "VNil"
 
--- runBatching'(KnownNat n) =>
---   :: (Functor f)
---   => (Vec (Existential n) rq -> f (Vec (Existential n) rs))
---   -> Batching rq rs t
---   -> f t
--- runBatching' fresh f (Batching (rqs :: Vec n1 rq) rssToR) = castFresh @n1 fresh (rssToR <$> f rqs)
+deriving instance (Show a) => Show (Vec n a)
 
-runBatching
-  :: (Functor f)
-  => (forall n. Vec n rq -> f (Vec n rs))
-  -> Batching rq rs t
-  -> f t
-runBatching f (Batching (rqs :: Vec n1 rq) rssToR) = rssToR <$> f rqs
-
-request :: a -> Batching a b b
-request a = Batching (VCons a VNil) vHead
-
-vHead :: Vec (Succ n) a -> a
-vHead (VCons a _) = a
-
-_head :: Lens.LensLike' f (Vec (Succ n) a) a
-_head = _
-
-toList :: Vec n a -> [a]
-toList VNil = []
-toList (VCons a as) = a : toList as
-
--- instance Functor (Batching s a b) where
---   fmap f (Batching as bsr) = Batching as (f . bsr)
-
--- instance (Dom s a, CFreeMonoid s, Dom s b) => Applicative (Batching s a b) where
---   pure x = Batching empty (const x)
---   Batching as1 bsf <*> Batching as2 bsr = Batching (Sized.append as1 as2) $ \bs ->
---     let
---       (bs1, bs2) = Sized.splitAt (Sized.sLength as1) bs
---     in
---     _
-{- [markdown]
-
--}
+deriving instance Functor (Vec n)
 
 data TheseTag
   = ThisTag
@@ -436,7 +449,7 @@ data TheseTag
   deriving (Show)
 
 -- These with tagged constructors, so a function can only map to the same constructor as the argument it receives
-data TaggedThese a b tag where
-  This :: a -> TaggedThese a b 'ThisTag
-  That :: b -> TaggedThese a b 'ThatTag
-  These :: a -> b -> TaggedThese a b 'TheseTag
+data TaggedThese tag a b where
+  This :: a -> TaggedThese 'ThisTag a b
+  That :: b -> TaggedThese 'ThatTag a b
+  These :: a -> b -> TaggedThese 'TheseTag a b
