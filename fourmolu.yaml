@@ -2,3 +2,4 @@ indentation: 2
 column-limit: 120
 function-arrows: leading
 in-style: no-space
+single-constraint-parens: never

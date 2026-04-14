@@ -1,3 +1,7 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE LinearTypes #-}
+{-# LANGUAGE TypeAbstractions #-}
+{-# LANGUAGE TypeFamilies #-}
 {- [markdown]
 # Existentials on a leash
 
@@ -21,17 +25,14 @@ As of GHC 9.12, GHC only supports 2 limited ways of existentially quantifying ty
 2. Using a GADT: `data Wrapper where Wrapper :: forall a. a -> Wrapper`. When pattern matching on `Wrapper`, `a` will be existentially quantified.
 
 [A proposal](https://github.com/goldfirere/ghc-proposals/blob/existentials/proposals/0473-existentials.rst) for adding existential types to GHC was made a while ago, but the author is now prioritizing other work.
-We will reuse the example of length-indexed vectors from the proposal, but first, the language extensions and imports used in this article:
+We will reuse the example of length-indexed vectors from the proposal, but first, the language extensions and imports used in this article.
+The main important thing about it that we use `L` and `NL` to disambiguate linear and non-linear functions, respectively, where needed.
 
 <details>
-<summary>Imports</summary>
+<summary>Imports and language extensions</summary>
 
 -}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures -Wno-unused-top-binds -Wno-orphans #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE LinearTypes #-}
-{-# LANGUAGE TypeAbstractions #-}
-{-# LANGUAGE TypeFamilies #-}
 
 {- cabal:
 ghc-options: -Wall
@@ -62,18 +63,28 @@ constraints:
 import Control.Batching
 import Control.Functor.Linear qualified as Linear.Control
 import Control.Lens qualified as Lens
+import Data.Bifunctor.Linear
 import Data.Char
 import Data.Fin.Int
-import Data.Function
 import Data.Functor ((<&>))
 import Data.Functor.Identity
+import Data.Functor.Linear qualified as L
 import Data.Kind
 import Data.Type.Equality
 import Data.Unrestricted.Linear
 import Data.Vec.Short qualified as V
-import GHC.Base
-import Prelude.Linear qualified as L
+import GHC.Base (Multiplicity (..), TYPE)
+import Prelude.Linear qualified as L (($))
+import Prelude.Linear hiding (fst, ($), (.))
 import Unsafe.Coerce (unsafeCoerce)
+
+-- import Prelude hiding ((.), Maybe(..), )
+import Prelude as NL (Applicative (..), Functor (..), foldMap, fst, ($), (<$>))
+
+-- Multiplicity polymorphic version of . which works in most non-linear code as well.
+(.) :: forall {rep} b (c :: TYPE rep) a m n. (b %m -> c) %n -> (a %m -> b) %m -> a %m -> c
+(.) f g x = f (g x)
+infixr 9 .
 
 {- [markdown]
 </details>
@@ -87,7 +98,7 @@ data Nat = Zero | Succ Nat
 type Vec :: Nat -> Type -> Type
 data Vec n a where
   VNil :: Vec Zero a
-  VCons :: a -> Vec n a -> Vec (Succ n) a
+  VCons :: a %1 -> Vec n a %1 -> Vec (Succ n) a
 
 {- [markdown]
 Suppose we want to define a function to convert a normal list to a length-indexed vector.
@@ -97,7 +108,7 @@ Let's work out the second option.
 -}
 
 data SomeVec a where
-  SomeVec :: forall n a. Vec n a -> SomeVec a
+  SomeVec :: forall n a. Vec n a %1 -> SomeVec a
 
 vecFromList :: [a] -> SomeVec a
 vecFromList [] = SomeVec VNil
@@ -113,7 +124,7 @@ It turns out that a CPS-variant would also be useless in this case, because the 
 
 As the author of the existential types proposal states (for a `filter` function, which has the same problem), it's not possible to define a lazy version of `vecFromList` in GHC's current type system.
 
-*So we have to work around it.*
+\*So we have to work around it.*
 
 ## Putting existentials on a leash
 
@@ -121,12 +132,13 @@ Essentially, we *have* to make the length of the vector visible in the return ty
 GHC only offers universal quantification for such a type variable, but somehow, we need to make it impossible for the caller of `vecFromList` to choose a specific type for this variable, so `vecFromList` can make this choice.
 To accomplish this, we start with a proxy type `Fresh` which can only be introduced with an existential type as parameter.
 
-```haskell
-newtype Fresh a = Fresh
+-}
+data Fresh0 a = Fresh0
 
-withFresh :: (forall a. Fresh a -> r) -> r
-withFresh f = Fresh
-```
+withFresh0 :: (forall a. Fresh0 a -> r) -> r
+withFresh0 f = f Fresh0
+
+{- [markdown]
 
 This proxy will serve as a proof-witness that the associated type variable was existentially quantified.
 The type of `vecFromList` becomes `forall n a. Fresh n -> [a] -> Vec n a` and the burden of the existential quantification is pushed outward to the caller.
@@ -141,191 +153,179 @@ We could define `castVec :: Fresh n -> Vec n a -> Vec n' a`, but ideally an exis
 This can be accomplished by providing a type equality witness (from `Data.Type.Equality`) instead of a specific casting function.
 
 We arrive at:
-```haskell
-newtype Fresh a = Fresh (forall b. a :~: b)
+-}
+newtype Fresh1 a = Fresh1 (forall b. a :~: b)
 
-withFresh :: (forall a. Fresh a -> r) -> r
-withFresh f = f (Fresh $ unsafeCoerce Refl)
-```
+withFresh1 :: (forall a. Fresh1 a -> r) -> r
+withFresh1 f = f (Fresh1 $ unsafeCoerce Refl)
+
+{- [markdown]
 
 Using `Data.Type.Equality.castWith`, we can now perform unsafe coercions for any instance of `a` for which we have a `Fresh a`!
 Now, we only need to remove the word "unsafe" from that sentence.
 
+--todo
 I believe it's sufficient to ensure that the existential quantification witness is used at most once.
 Until we use the witness, no values of type `a` can exist because it was existentially quantified.
 Values of a types `f` parameterized by `a` can exist, but such values must be independent of `a` for the same reason.
 As long as there only ever exists one `a ~ b`, it should then be safe to substitute `a` for the `b` which is chosen.
 
-We can ensure this by requiring that a `Fresh a` is used linearly and hiding the constructor, like so:
+The first steps to this are to require that a `Fresh a` is used linearly in the continuation passed to `withFresh` and hiding the constructor `Fresh`, like so:
 -}
 
 newtype Fresh a = Fresh (forall b. a :~: b) -- consider the constructor hidden
 
-withFresh :: (forall a. Fresh a %1 -> r) %1 -> r
-withFresh f = f L.$ Fresh $ unsafeCoerce Refl
+instance Consumable (Fresh a) where
+  consume (Fresh Refl) = ()
 
-castFresh :: forall b r a. Fresh a %1 -> ((a ~ b) => r) -> Ur r
-castFresh (Fresh (Refl :: a :~: b)) r = Ur r
+withFresh2 :: (forall a. Fresh a %1 -> r) %1 -> r
+withFresh2 f = f L.$ Fresh $ unsafeCoerce Refl
+
+castFresh :: forall b r a. Fresh a %1 -> (a ~ b => r) %1 -> r
+castFresh (Fresh (Refl :: a :~: b)) r = r
 
 {- [markdown]
-The function `castFresh` is needed to replace `Data.Type.Equality.castWith` since the user can't get the `a :~: b` from `Fresh` anymore since the constructor is hidden.
+The function `castFresh` is needed to replace `Data.Type.Equality.castWith` since the user can't get the `a :~: b` from pattern matching on `Fresh` anymore.
 
-I spent some time trying to find a way this is unsafe, and I think one attempt is worth showing because I was surprised that it failed.
-While the linear function prevents using the existential quantification witness more than once, it can be used differently in different branches of the program and I thought one could use this to generate incorrect type equalities.
-For example, GHC does not allow a function like `test`:
-
-<!-- ```haskell -->
+However, this is not sufficient to guarantee only one `a ~ b` equality.
+Even with the linear arrow in `withFresh`, the existential quantification witness can be used differently in different branches of the program.
+The following example shows how this can be used to generate incorrect type equalities.
 -}
+
 data GADT a where
   Int :: GADT Int
   Char :: GADT Char
 
--- test :: Bool -> GADT a
--- test b = if b then Int else Char
-{-
-```
-
-However, using an existential quantification witness, something like that becomes possible:
-
-<!-- ```haskell -->
--}
 data Wrapper where
   Wrapper :: forall a. (Bool -> GADT a) %1 -> Wrapper
 
 wrapper :: Wrapper
 wrapper =
-  withFresh
+  withFresh2
     ( \(fresh :: Fresh a) ->
         Wrapper @a
-          ( test fresh
-          )
+          (\b -> if b then castFresh @Int fresh Int else castFresh @Char fresh Char)
     )
 
-test :: Fresh a %1 -> Bool -> GADT a
-test fresh b = unur L.$ if b then castFresh @Int fresh Int else castFresh @Char fresh Char
+{- [markdown]
 
+```haskell
 conflict :: Int :~: Char
 conflict =
   wrapper & \(Wrapper @a (f :: Bool -> GADT a)) ->
     let
       int = f True :: GADT a
       char = f False :: GADT a
-    in trans @Int @a @Char
-      ( case int of
-          Int -> Refl :: Int :~: a
-      )
-      ( case char of
-          Char -> Refl :: a :~: Char
-      )
-{-
-<!-- ``` -->
-
-GHC gives the following type errors:
-```
-• Couldn't match type ‘b0’ with ‘Int’
-  Expected: Int :~: b0
-    Actual: Int :~: a
-• In the expression: Refl :: Int :~: a
-  In a case alternative: Int -> Refl :: Int :~: a
-  In the first argument of ‘trans’, namely
-    ‘(case int of Int -> Refl :: Int :~: a)’
+    in
+      trans @Int @a @Char -- trans :: (a :~: b) -> (b :~: c) -> a :~: c
+        ( case int of
+            Int -> Refl :: Int :~: a
+        )
+        ( case char of
+            Char -> Refl :: a :~: Char
+        )
 ```
 
-```
-• Couldn't match type ‘b0’ with ‘Char’
-  Expected: b0 :~: Char
-    Actual: Char :~: a
-• In the expression: Refl :: Char :~: a
-  In a case alternative: Char -> Refl :: Char :~: a
-  In the second argument of ‘trans’, namely
-    ‘(case char of Char -> Refl :: Char :~: a)’
-```
+todo: `Fresh`-value
+In essence, the `Fresh` escapes its linear scope through `Wrapper`.
+Because `Wrapper` does not need to be consumed linearly outside with `withFresh` call, we can use the embedded function (and thus the captured `Fresh` inside) twice.
+I think the trick to prevent this is pretty neat: we can't ensure the result `r` of `withFresh` is consumed linearly, so we must put a constraint on `r` that ensures it can not be used to duplicate a `Fresh`.
+Counterintuitively, we must require that `r` *can* be duplicated, i.e. it's an instance of [`Dupable`](https://hackage-content.haskell.org/package/linear-base-0.7.0/docs/Data-Unrestricted-Linear.html#t:Dupable).
 
-In the pattern match of `Int`, GHC does not generate the constraint `Int ~ a`, but it uses a fresh type variable `b0` and generates `Int ~ b0` instead.
-I'm not sure why it does this, but I'm happy it does because otherwise I don't think I can make this trick safe.
+To understand why, we must realize 2 things:
+1. A `Fresh` can only be captured by a linear field (like `(Bool -> GADT a)` in `Wrapper`). Otherwise the `Fresh`-value would not be consumed linearly.
+2. A type that is `Dupable` can only contain a linear field when values in that field can be duplicated, but a function can not (even if it's input is `Bounded`, because the function must be consumed linearly and finding the different outputs requires applying it multiple times).
 
-Which leaves me to show how to ensure the existential quantification witness is used at most once: linear functions.
-We finally arrive at the real definition of `Fresh` and `withFresh`:
+Therefore it is safe to duplicate a `Dupable` value after it's produced by `withFresh`.
+In other words, we prevent unsafe duplication of `Fresh` by requiring that all values that leave `Fresh` can be duplicated.
+
+Thus we finally arrive at the final (and as far as I understand, safe) version of `withFresh`:
 -}
 
--- newtype Fresh a = Fresh (forall b. a :~: b)
-
--- withFresh :: (forall a. Fresh a %1 -> r) %1 -> r
--- withFresh f = f L.$ Fresh $ unsafeCoerce Refl
-
--- byFresh :: forall b a. Fresh a %1 -> Ur (a :~: b)
--- byFresh (Fresh (Refl :: a :~: b)) = Ur Refl
-
--- castFresh :: forall b r a. Fresh a %1 -> ((a ~ b) => r) -> Ur r
--- castFresh (Fresh (Refl :: a :~: b)) r = Ur r
+withFresh :: Dupable r => (forall a. Fresh a %1 -> r) %1 -> r
+withFresh f = f L.$ Fresh $ unsafeCoerce Refl
 
 {- [markdown]
-The linear arrow `%1 ->` ensures that `Fresh $ unsafeCoerce Refl` is used exactly once in the function `f` (if the result of type `r` is completely evaluated).
-
-If we try to use it more than once, we get a type error:
-```haskell
--- todo: rework to True ~ False
-conflict =
-  withFresh
-    ( \(fresh :: Fresh a) ->
-        castFresh @Int @(Int :~: a) fresh Refl & \(Ur intEqualsA) ->
-        castFresh @Char @(a :~: Char) fresh Refl & \(Ur aEqualsChar) ->
-          let
-            Refl = trans intEqualsA aEqualsChar :: Int :~: Char
-          in
-            error "Int /= Char"
-    )
-```
-```
-• Couldn't match type ‘Many’ with ‘One’
-    arising from multiplicity of ‘fresh’
-• In the pattern: fresh :: Fresh a
-  In the first argument of ‘withFresh’, namely
-    ‘(\ (fresh :: Fresh a)
-        -> castFresh @Int @(Int :~: a) fresh Refl
-             & \ (Ur intEqualsA)
-                 -> castFresh @Char @(a :~: Char) fresh Refl
-                      & \ (Ur aEqualsChar) -> ...)’
-  In the expression:
-    withFresh
-      (\ (fresh :: Fresh a)
-         -> castFresh @Int @(Int :~: a) fresh Refl
-              & \ (Ur intEqualsA)
-                  -> castFresh @Char @(a :~: Char) fresh Refl
-                       & \ (Ur aEqualsChar) -> ...)
-```
-Note that the constructor `Fresh` is linear (because it's a `newtype`).
-Therefore, pattern matching on `(Fresh f)` still requires linear use of `f`.
-
-Now we can define a lazy version of `vecFromList`
+Now we can also define a lazy version of `vecFromList`
 -}
 
-type Exists a b = Fresh a %1 -> Ur b
+-- todo: should have forall
+type Exists a b = Fresh a %1 -> b
 
-lazyVecFromList :: [a] -> Exists n (Vec n a)
-lazyVecFromList [] fresh = castFresh @Zero fresh VNil
-lazyVecFromList (a : as) fresh =
+infix 3 `SuchThat`
+data SuchThat a c where
+  SuchThat :: c => a %1 -> SuchThat a c
+
+-- Explicit projection function because multiplicity-parametric record projections are not yet implemented
+unSuchThat :: SuchThat a c %1 -> a
+unSuchThat (SuchThat a) = a
+
+lazyVecFromList :: [a] -> Exists n (Vec n (Ur a))
+lazyVecFromList [] n = castFresh @Zero n VNil
+lazyVecFromList (a : as) n =
   withFresh
     ( \(freshPredN :: Fresh predN) ->
-        lazyVecFromList as freshPredN
-          L.& ( \(Ur asVec) ->
-                  castFresh @(Succ predN) fresh (VCons a asVec)
-              )
+        castFresh @(Succ predN) n (VCons (Ur a) L.$ lazyVecFromList as freshPredN)
     )
 
-tryHead :: Vec n a -> Maybe a
-tryHead VNil = Nothing
-tryHead (VCons x _) = Just x
+-- bonus example using SuchThat
+vecNonEmpty :: forall n m a. Vec n a %1 -> Exists m (Maybe (Vec (Succ m) a `SuchThat` n ~ Succ m))
+vecNonEmpty VNil n = lseq n Nothing
+vecNonEmpty (VCons @_ @o x xs) n = castFresh @o n (Just L.$ SuchThat @(n ~ Succ m) (VCons x xs))
+
+vecUncons :: Vec (Succ n) a %1 -> (a, Vec n a)
+vecUncons (VCons a as) = (a, as)
 
 lazyVecFromListIsLazy :: Maybe Int
-lazyVecFromListIsLazy = unur L.$ withFresh (lift tryHead L.. lazyVecFromList [0, undefined])
+lazyVecFromListIsLazy =
+  withFresh
+    ( \n ->
+        withFresh
+          ( L.fmap (second SomeVec . vecUncons . unSuchThat)
+              . vecNonEmpty (lazyVecFromList (0 : error "second element evaluated") n)
+          )
+    )
+    <&> (\(Ur a, _) -> a)
 
 -- >>> lazyVecFromListIsLazy
--- Just 0
+-- This causes a segfault in HLS and GHCi. Will create an issue later.
+
+-- main = print lazyVecFromListIsLazy
+-- prints "Just 0"
 
 {- [markdown]
+
+<details>
+<summary>Required Consumable/Dupable instances</summary>
+
+-}
+
+-- Nothing special going on here. They just have to be written out manually because Vec and SomeVec are a GADTs.
+instance Consumable a => Consumable (Vec n a) where
+  consume VNil = ()
+  consume (VCons x xs) = lseq x L.$ consume xs
+
+instance Dupable a => Dupable (Vec n a) where
+  dupR VNil = L.pure VNil
+  dupR (VCons x xs) = VCons L.<$> dupR x L.<*> dupR xs
+
+instance Consumable a => Consumable (SomeVec a) where
+  consume (SomeVec v) = consume v
+
+instance Dupable a => Dupable (SomeVec a) where
+  dupR (SomeVec v) = SomeVec L.<$> dupR v
+
+instance L.Functor (Vec n) where
+  fmap _ VNil = VNil
+  fmap f (VCons x xs) = VCons (f x) L.$ L.fmap f xs
+
+{- [markdown]
+</details>
+
 The recursive case has become a little more complicated: we need an extra existential type to pass to the recursive application of `lazyVecFromList`.
-We can't use the one we got as an argument, because we need it to cast `VCons a (lazyVecFromList freshPredN as) :: Vec (n - 1) a` to `Vec n a` and we can only use it once.
+We can't use the one we got as an argument, because the recursive call should produce a vector of type `Vec predN a` instead of `Vec n a`.
+
+The test `lazyVecFromListIsLazy` shows that that `lazyVecFromList` is lazy (shocker, I know) by getting the head
 
 I will admit that linear types are also not an ideal solution, both in theory and in practice.
 On the theoretical part, affine types would be much better suited, because an affine function arrow would allow the argument to not be used.
@@ -341,7 +341,9 @@ We can recover the original type of `vecFromList` though:
 -}
 
 lazyVecFromList2 :: [a] -> SomeVec a
-lazyVecFromList2 xs = unur L.$ withFresh (lift SomeVec L.. lazyVecFromList xs)
+lazyVecFromList2 xs =
+  withFresh (SomeVec . lazyVecFromList xs)
+    & \(SomeVec vec) -> SomeVec $ L.fmap unur vec
 
 {- [markdown]
 Now, the use of linear types in the implementation of `lazyVecFromList2` is completely hidden from the user and they don't have to deal with the difficulties surrounding linear types.
@@ -464,7 +466,7 @@ I don't know what half of the function names used in the implementation of `part
 -}
 
 batching
-  :: (Functor f)
+  :: Functor f
   => Lens.LensLike (Batching a b) s t a b
   -> (forall n. V.Vec n a -> f (V.Vec n b))
   -> s
@@ -482,7 +484,7 @@ partsOf o f = batching o $ expose f
 pTraverseOf
   :: forall xs ys h f g s t
    . (Applicative h, Linear.Control.Functor h)
-  => (forall m. (Applicative m) => PreservingLensLike m s t f xs g ys)
+  => (forall m. Applicative m => PreservingLensLike m s t f xs g ys)
   -> (forall x. ApplyList (f x) xs -> h (ApplyList (g x) ys))
   -> s
   -> h t
@@ -494,7 +496,7 @@ demo1 =
   runIdentity $
     pTraverseOf
       (partsOf (Lens.traversed . Lens._Right))
-      (\chars -> Identity $ fmap (const $ foldMap (: []) chars) chars)
+      (\chars -> Identity $ fmap (const $ NL.foldMap (: []) chars) chars)
       [Left True, Right 'h', Left False, Right 'i']
 
 -- >>> demo
@@ -566,7 +568,7 @@ type PreservingLensLike' h s f xs = PreservingLensLike h s s f xs f xs
 type PreservingGetter r s f xs = PreservingLensLike' ((,) r) s f xs
 
 pView :: PreservingGetter (Some f xs) s f xs -> s -> Some f xs
-pView o s = fst $ o (hide (\ @x x -> (Some @x x, x))) s
+pView o s = NL.fst $ o (hide (\ @x x -> (Some @x x, x))) s
 
 {- [markdown]
 ## Conclusion
