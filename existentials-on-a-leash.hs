@@ -1,7 +1,7 @@
 {- [markdown]
 # Existentials on a leash
 
-In this article, I will share 2 new workarounds for (the lack of) existentially quantified type variables in Haskell
+In this article, I will share 2 new workarounds for (the lack of) existentially quantified type variables in Haskell.
 The first workaround allows them to appear "naked" (without CPS-style/GADT wrapping) in a type signature, while the second allows for defining optics over types containing existentially quantified variables (though without having them appear naked in the type signature).
 
 Both these techniques rely on witness-values passed linearly through some function.
