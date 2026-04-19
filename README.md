@@ -1,4 +1,4 @@
-{- [markdown]
+
 # Existentials on a leash
 
 In this article, I will share 2 new workarounds for (the lack of) existentially quantified type variables in Haskell
@@ -42,7 +42,8 @@ We'll work out the second option, but first we need to enable some language exte
 <details>
 <summary>Imports and language extensions</summary>
 
--}
+
+``` haskell
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures -Wno-unused-top-binds -Wno-orphans #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE LinearTypes #-}
@@ -95,14 +96,16 @@ import Prelude as NL (Applicative (..), Functor (..), fst, ($), (<$>))
 (.) :: forall {rep} b (c :: TYPE rep) a m n. (b %m -> c) %n -> (a %m -> b) %m -> a %m -> c
 (.) f g x = f (g x)
 infixr 9 .
-{- [markdown]
+```
+
 </details>
 
 The main thing to remember is that we use `L` and `NL` to disambiguate linear and non-linear functions, respectively, where needed.
 
 Now we can define our vectors and `vecFromList`:
--}
 
+
+``` haskell
 data Nat = Zero | Succ Nat
 
 data Vec n a where
@@ -116,7 +119,8 @@ vecFromList :: [a] -> SomeVec a
 vecFromList [] = SomeVec VNil
 vecFromList (a : as) =
   vecFromList as & \(SomeVec aVec) -> SomeVec $ VCons a aVec
-{- [markdown]
+```
+
 If you've never seen the `%1` used the definition for `VCons`, you can ignore them for now.
 This marks the fields of the constructor as linear, which will be explained more later.
 
@@ -136,12 +140,14 @@ Essentially, we *have* to make the length of the vector visible in the return ty
 GHC only offers universal quantification for such a type variable, but somehow, we need to make it impossible for the caller of `vecFromList` to choose a specific type for this variable, so `vecFromList` can make this choice.
 To accomplish this, we start with a proxy type `Fresh` which can only be introduced with an existential type as parameter.
 
--}
+
+``` haskell
 data Fresh0 a = Fresh0
 
 unpack0 :: (forall a. Fresh0 a -> r) -> r
 unpack0 f = f Fresh0
-{- [markdown]
+```
+
 
 This proxy will serve as a proof-witness that the associated type variable was existentially quantified elsewhere in the program.
 The type of `vecFromList` becomes `forall n a. [a] -> Fresh n -> Vec n a` and the burden of the existential quantification is pushed outward to the caller.
@@ -157,12 +163,14 @@ We could define `packVec :: Vec n a -> Fresh n' -> Vec n' a`, but ideally such a
 This can be accomplished by providing a type equality witness (from `Data.Type.Equality`) instead of a specific casting function.
 
 We arrive at:
--}
+
+``` haskell
 newtype Fresh1 a = Fresh1 (forall b. a :~: b)
 
 unpack1 :: (forall a. Fresh1 a -> r) -> r
 unpack1 f = f (Fresh1 $ unsafeCoerce Refl)
-{- [markdown]
+```
+
 
 Using `Data.Type.Equality.castWith`, we can now perform unsafe coercions for any instance of `a` for which we have a `Fresh a`!
 Now, we only need to remove the word "unsafe" from that sentence.
@@ -173,8 +181,9 @@ Values of a type `f` parameterized by `a` can exist, but such values must be ind
 So as long as there only ever exists one `a ~ b`, it should then be safe to substitute `a` for the `b` which is chosen.
 
 The first steps to this are (1) to hide the constructor `Fresh` and (2) to require that a `Fresh`-value is used linearly in the continuation passed to `unpack`, like so:
--}
 
+
+``` haskell
 newtype Fresh a = Fresh (forall b. a :~: b) -- consider the constructor hidden
 
 type Exists a b = Fresh a %1 -> b -- conceptually this should be `forall a. Fresh a %1 -> b`, but that prevents `a` from being used in `b` and defeats the entire point.
@@ -184,7 +193,8 @@ unpack2 f = f L.$ Fresh $ unsafeCoerce Refl
 
 pack :: forall b r a. (a ~ b => r) %1 -> Exists a r
 pack r (Fresh (Refl :: a :~: b)) = r
-{- [markdown]
+```
+
 The `%1` in `type Exists a b = Fresh a %1 -> b` demands that the function is linear.
 This means that the compiler will verify that such a function will evaluate the argument exactly once if the result of the function is evaluated to normal form.
 These annotations can also be used in the types for GADT constructors (like `VCons`).
@@ -194,8 +204,9 @@ The function `pack` is needed to replace `Data.Type.Equality.castWith` since the
 
 However, this is not sufficient to ensure a `pack`-coercion always targets the same type for each `Fresh`-value.
 The following example shows how this can be used to generate incorrect type equalities.
--}
 
+
+``` haskell
 data GADT a where
   Int :: GADT Int
   Char :: GADT Char
@@ -210,7 +221,8 @@ wrapper =
         Wrapper @a
           (\b -> if b then pack @Int Int fresh else pack @Char Char fresh)
     )
-{- [markdown]
+```
+
 
 ```haskell
 conflict :: Int :~: Char
@@ -239,11 +251,13 @@ To understand why, we must realize 3 things:
 3. `Fresh` is not `Dupable`, so because of 1. and 2. it can not occur in a `Dupable` value.
 
 Therefore, it is safe to duplicate a `Dupable` value after it's produced by `unpack` and we arrive at the final version of `unpack`:
--}
 
+
+``` haskell
 unpack :: Dupable r => (forall a. Exists a r) %1 -> r
 unpack f = f L.$ Fresh $ unsafeCoerce Refl
-{- [markdown]
+```
+
 So is this completely safe now?
 Well, only if `Dupable r` is a faithful instance of `Dupable`.
 If you implement `dup` as `error "this is never used anyway"` for a linearly captured function, you'd get away with it and you could still write the `conflict` expression from before.
@@ -262,8 +276,9 @@ To me, that's acceptable.
 There are some safer alternatives, but they require more effort from the user and don't justify the cost.
 
 Now let's continue and finally define a lazy `vecFromList`:
--}
 
+
+``` haskell
 lazyVecFromList0 :: [a] -> Exists n (Vec n (Ur a))
 lazyVecFromList0 [] n = pack @Zero VNil n
 lazyVecFromList0 (a : as) n =
@@ -273,7 +288,8 @@ lazyVecFromList0 (a : as) n =
     ( \ @predN predN ->
         pack @(Succ predN) (VCons (Ur a) L.$ lazyVecFromList0 as predN) n
     )
-{- [markdown]
+```
+
 The manual `pack`ing and `unpack`ing makes the definition adds significant verbosity, but I believe each use is necessary.
 The `pack`s are needed because neither `VNil` nor `VCons` produce vectors of arbitrary length, and we can't remove the `unpack` because we can't use the same `Fresh`-value for coercing the `VCons`.
 
@@ -293,20 +309,23 @@ It would be much nicer if we could have `lazyVecFromList0 :: [a] -> Exists n (Ur
 That's no problem for the `[]`-case, but it would mean that we have to pattern match on `Ur` in the recursive case, which in turn means the function always evaluates until the final `Ur` produced in the `[]`-case, which would make the function strict in the length of the list.
 
 Now that's all cleared up, here is the small `pack`/`unpack` abstraction I promised:
--}
 
+
+``` haskell
 repack :: forall f n a. Dupable a => (forall m. n ~ f m => Exists m a) -> Exists n a
 repack f n = unpack (\ @m m -> pack @(f m) (f m) n)
 
 lazyVecFromList1 :: [a] -> Exists n (Vec n (Ur a))
 lazyVecFromList1 [] = pack @Zero VNil
 lazyVecFromList1 (a : as) = repack (VCons (Ur a) . lazyVecFromList1 as)
-{- [markdown]
+```
+
 I'm actually quite surprised the recursive case does not need any type arguments despite `f` only occurring in a constraint.
 
 Now for the laziness test:
--}
 
+
+``` haskell
 lazyVecFromListIsLazy :: Maybe Int
 lazyVecFromListIsLazy = unpack (SomeVec . lazyVecFromList1 (0 : error "second element evaluated")) & \case
   (SomeVec (VCons (Ur a) _)) -> Just a
@@ -315,14 +334,16 @@ lazyVecFromListIsLazy = unpack (SomeVec . lazyVecFromList1 (0 : error "second el
 -- >>> lazyVecFromListIsLazy
 -- Just 0
 
-{- [markdown]
+```
+
 
 <details>
 <summary>Required Consumable/Dupable instances</summary>
 
 Nothing special going on here. They just have to be written out manually because `Vec` and `SomeVec` are a GADTs.
--}
 
+
+``` haskell
 instance Consumable a => Consumable (Vec n a) where
   consume VNil = ()
   consume (VCons x xs) = lseq x L.$ consume xs
@@ -347,7 +368,8 @@ instance Consumable (Fresh a) where
 deriving instance Show a => Show (Vec n a)
 deriving instance Show a => Show (SomeVec a)
 deriving instance Show a => Show (Ur a)
-{- [markdown]
+```
+
 </details>
 
 And thus we prove the laziness of `lazyVecFromList1`!
@@ -359,8 +381,9 @@ Inside `unpack` we'd have to do that linearly, which is possible to do with `con
 
 Aside from the `exists` quantifier, the existential types proposal also proposes a type level operator `(/\) :: Constraint -> Type -> Type` that puts constraints on a given type.
 This operator gets some special treatment during type checking, but when `pack`/`unpacking` is explicit like in our implementation, it seems the current type checking algorithm already does quite well!
--}
 
+
+``` haskell
 data (/\) c a where
   SuchThat :: c => a %1 -> c /\ a
 
@@ -393,7 +416,8 @@ demo0 =
 
 -- main = print demo0
 -- prints "Just (Ur 0,SomeVec (VCons (Ur 1) (VCons (Ur 2) (VCons (Ur 3) VNil))))"
-{- [markdown]
+```
+
 This demo is a bit contrived because I wanted to use the `n ~ Succ m` explicitly and linear types force the explicit duplication and consumption of values, but I think the point should be clear: no explicit type annotations outside those of functions signatures were needed to make GHC resolve all constraints correctly!
 
 While that "inconvenience" is by design, there are also still a lot of unintentional difficulties with working with linear types:
@@ -405,13 +429,15 @@ While that "inconvenience" is by design, there are also still a lot of unintenti
 So while this linear-existentiality-witness-techinique allows some things that are not possible with the existing existential-type-workarounds, I can't recommend using it outside of cases that are very limited in scope like `lazyVecFromList`.
 
 Luckily, we can define a `lazyVecFromList` that hides all of the linear-types complexity and falls back to GADT-wrapper workaround:
--}
 
+
+``` haskell
 lazyVecFromList :: [a] -> SomeVec a
 lazyVecFromList xs =
   unpack (SomeVec . lazyVecFromList1 xs)
     & \(SomeVec vec) -> SomeVec $ L.fmap unur vec
-{- [markdown]
+```
+
 
 ## Invisible type preservation with linear control functors
 
@@ -437,13 +463,15 @@ Let's start with a definition for `ExistentiallyIndexed`.
 We don't want it to be specific to vectors, or even types with kind `k -> Type -> Type`.
 We will use the kind-heterogeneous type-level lists from `kind-apply`, named [`LoT`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t:LoT) and the operator [`:@@:`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t::-64--64-:) which applies a type level list to a type constructor.
 This permits the following definition of `ExistentiallyIndexed`:
--}
 
+
+``` haskell
 data Witness x = Witness -- consider the constructor hidden
 
 data ExistentiallyIndexed f xs where
   ExistentiallyIndexed :: Witness y %1 -> f y :@@: xs -> ExistentiallyIndexed f xs -- Note the linear arrow for `Witness x`
-{- [markdown]
+```
+
 Now we can make the functions meant in the second idea concrete. An example would be a function with type `forall x y. Witness x -> Exists y (Witness y)`.
 Since there are no other sources of `Witness` in scope, the only way to obtain a `Witness` value is from the argument of the function.
 Hence we can derive `x ~ y`.
@@ -456,11 +484,13 @@ This is relatively easy to achieve by making the arrow that takes `Witness x` li
 This only permits `Setter` optics though, which is a bit disappointing.
 We need to extend the "proof" further to allow functions that produce a functorial context of `ExistentiallyIndexed`, like `forall x f g h xs ys. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`.
 This is tricky because `h` is also universally quantified and could be chosen to be something like
--}
 
+
+``` haskell
 data ConstWitness a where
   ConstWitness :: Witness x %1 -> ConstWitness a
-{- [markdown]
+```
+
 which would allow the Witness value to enter `Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`-functions elsewhere, e.g. through `f x :@@: xs`.
 To prevent this, we need to require `h (ExistentiallyIndexed f x)` to contain at least one `ExistentiallyIndexed f x`.
 Luckily, a solution for this already exists: linear control functors.
@@ -475,8 +505,9 @@ For example `State` and `IO` are control functors, while `[]` and `Const` aren't
 
 This gives us exactly what we need.
 Let's finally write a function that makes use of the "proof":
--}
 
+
+``` haskell
 withWitness
   :: forall h f g xs ys a
    . (Linear.Control.Functor h, Functor h) -- The normal non-linear Functor is not a superclass of Linear.Control.Functor, so we need to add both.
@@ -484,14 +515,16 @@ withWitness
   -> f a :@@: xs
   -> h (g a :@@: ys)
 withWitness f x = f @a Witness x <&> \(ExistentiallyIndexed Witness y) -> unsafeCoerce y
-{- [markdown]
+```
+
 I think this `unsafeCoerce` is safe due to the restrictions described above.
 Just like with `unpack`, if you can find a way to break it, please let me know!
 
 Due to the type families, this function is hopelessly ambiguous (as in: almost none of the type variables can be inferred from its usage).
 Let's make it a bit easier to use and demonstrate conversion between rank-2 based existentials:
--}
 
+
+``` haskell
 expose
   :: forall x h f g xs ys
    . (Linear.Control.Functor h, Functor h)
@@ -505,11 +538,13 @@ hide
   -> ExistentiallyIndexed f xs
   %1 -> h (ExistentiallyIndexed g ys)
 hide f (ExistentiallyIndexed @x w x) = Linear.Control.fmap (\(Ur y) -> ExistentiallyIndexed w y) L.$ Ur <$> f @x x
-{- [markdown]
+```
+
 The function `expose` exposes the existential type hidden in `ExistentiallyIndexed`, while `hide` hides a type in `ExistentiallyIndexed`.
 Now we can move on to the optics bit.
--}
 
+
+``` haskell
 vecToList :: Vec n a -> [a]
 vecToList VNil = []
 vecToList (VCons a as) = a : vecToList as
@@ -558,7 +593,8 @@ demo1 =
 
 -- main = print demo1
 -- prints [Left True,Right "hi",Left False,Right "hi"]
-{- [markdown]
+```
+
 I'll admit, the demo is a bit contrived again, but the point is that this shows how `partsOf` allows you to work over each element of a traversal with the context of all visited elements.
 I also don't know the internals of `lens` well enough to say that this is the best way to implement `partsOf`.
 I just took the current implementation and added conversions to and from vectors, but maybe there's a way to make the `Bazaar` use vectors directly.
@@ -573,8 +609,9 @@ Something else worth noting about the code block above is that we can actually d
 Some optic combinators already abstract in the profunctor in the optics transformation, so combinators like [`taking`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:taking) and [`failing`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:failing) should also work with "preserving" optics.
 
 Speaking of standard optics, wouldn't it be nice if we could use them on `ExistentiallyIndexed` and compose them with preserving optics?
--}
 
+
+``` haskell
 type instance Lens.Index (Vec n a) = Int
 type instance Lens.IxValue (Vec n a) = a
 
@@ -603,13 +640,15 @@ demo2 =
 main = print demo2
 -- prints [Left True,Right 'h',Left False,Right 'I']
 -- notice how the "i" at the end is now capitalized
-{- [markdown]
+```
+
 As shown we can run standard optics like `Lens.ix` on `ExistentiallyIndexed` foci using the `hidden` combinator.
 And while the example does not show it, you can see from the type of hidden that we could precompose it with standard optics (like `hidden (...) . standardOptic`), because the arrow in `(a -> f b)` in `hidden`'s type is not linear.
 
 Finally, I'd also like to show how to define `Getter`s for preserving optics, because this was not possible with some of my failed ideas for preserving optics.
--}
 
+
+``` haskell
 data Some f xs where
   Some :: forall x f xs. f x :@@: xs -> Some f xs
 
@@ -619,7 +658,8 @@ type PreservingGetter r s f xs = PreservingLensLike' ((,) r) s f xs
 
 pView :: PreservingGetter (Some f xs) s f xs -> s -> Some f xs
 pView o s = NL.fst $ o (hide (\ @x x -> (Some @x x, x))) s
-{- [markdown]
+```
+
 ## Wrapping up
 
 The purpose of this article is put these ideas out there and see if someone sees any safety issues that I have overlooked.
@@ -632,4 +672,3 @@ In the meantime, I'll continue working on the other optics I needed these techni
 Thanks for reading and have fun experimenting!
 
 ~cdfa
--}
