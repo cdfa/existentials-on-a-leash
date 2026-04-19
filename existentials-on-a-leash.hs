@@ -17,6 +17,7 @@ Familiarity with GADTs, linear types and optics (for the sections pertaining to 
 
 That being said, I made it as easy as I can for the reader to tinker with the code and interactively learn about these concepts by providing a GitHub Codespace prebuild (EU/NA?) (todo) and GitPod (other continents).
 Clicking either of these links will allow you to tinker with the code with the support of the Haskell Language Server from a Visual Studio Code instance running in your browser.
+It might even be a nice way to read the article because you can hover over values to see their types for example.
 
 ## Current limitations of existential types
 
@@ -234,14 +235,75 @@ To understand why, we must realize 3 things:
 2. A type that is `Dupable` can only contain a linear field when that field is also `Dupable`, but a function is not (even if it's input is `Bounded`, because the function must be consumed linearly and finding the different outputs requires applying it multiple times).
 3. `Fresh` is not `Dupable`, because of 1. and 2. it can not occur in a `Dupable` value.
 
-Therefore it is safe to duplicate a `Dupable` value after it's produced by `unpack` and we arrive at the final (and as far as I understand, safe) version of `unpack`:
+Therefore it is safe to duplicate a `Dupable` value after it's produced by `unpack` and we arrive at the final version of `unpack`:
 -}
 
 unpack :: Dupable r => (forall a. Exists a r) %1 -> r
 unpack f = f L.$ Fresh $ unsafeCoerce Refl
 
 {- [markdown]
-Now we can also define a lazy version of `vecFromList`
+So is this completely safe now?
+Well, only if `Dupable r` is a faithful instance of `Dupable`.
+If you implement `dup` as `error "this is never used anyway"` for a linearly captured function, you could still write the `conflict` expression from before and you'd get away with it.
+We could have `unpack` call `dup` to verify this does not happen, but that would make it so strict that it becomes useless for implementing a lazy `vecFromList`.
+
+Alternatively, we could define a closed type family `ClosedDupable` which uses [`RepK`](todo) from `kind-generics` to see if the representation of a type contains a linear function field (if you don't know `kind-generics`, it extends the language of `GHC.Generics` such that GADTs can also get a generic representation).
+The drawback here is that this requires users to derive `RepK` using template haskell or define it manually, and I don't think that's worth the extra safety.
+
+Another alternative I'v considered is to use the property of `Fresh`-values that the `a` in `Fresh a` is always existential.
+We can prevent a GADT occurring in `r` from capturing it by using a similar type family to inspect the generic representation as mentioned above.
+This might be good solution for when you do need to have a function as a linear field in `r`, but generally I think it's a more severe restriction that `Dupable`.
+
+In summary, I believe `unpack` is only unsafe when used in combination with other unsafe functions (in the implementation of `Dupable`).
+To me, that's acceptable.
+There are some safer alternatives, but they require more effort from the user and don't justify the cost.
+
+Now lets continue and finally define a lazy `vecFromList`:
+-}
+
+lazyVecFromList0 :: [a] -> Exists n (Vec n (Ur a))
+lazyVecFromList0 [] n = pack @Zero VNil n
+lazyVecFromList0 (a : as) n =
+  -- This `unpack` actually unpacks the `Vec` produced by the recursive call, not the one `pack`ed immediately below
+  unpack
+    -- TypeAbstractions syntax
+    ( \ @predN predN ->
+        pack @(Succ predN) (VCons (Ur a) L.$ lazyVecFromList0 as predN) n
+    )
+
+{- [markdown]
+The manual `pack`ing and `unpack`ing makes the definition significantly more verbose, but I believe they are all necessary.
+The `pack`s are needed because neither `VNil` nor `VCons` produce vectors of arbitrary length, and we can't remove the `unpack` because we can't use the same `Fresh`-value for coercing the `VCons`
+
+However, as you'll see in the next code block, we can abstract some of the verbosity away.
+
+We should also test that this definition is actually lazy.
+This is actually much more work than I hoped because the produced vector actually also has to be consumed linearly (until it escapes the `unpack` that provides the initial `Fresh`-value that's used).
+That's because linear arrows don't just require that the argument is consumed exactly once.
+They actually say that if the caller evaluates the produced value to normal form, then the function will evaluate the argument to normal form exactly once.
+So a function that takes a `Fresh`-value in `unpack` and passed it to `lazyVecFromList0` must also treat the produced vector linearly (i.e. use it for the function's result in some way).
+
+You might also have noticed that the produced vector has elements of type `Ur a` instead of just `a`.
+For those unfamiliar with `linear-base`, `Ur` is a very simple type (`data Ur a = Ur a`), which is non-linear in the captured `a`-value.
+This allows linear functions to produce values of which some parts are unrestricted (hence the name `Ur`).
+
+It would be much nicer if we could have `lazyVecFromList0 :: [a] -> Exists n (Ur (Vec n a))`.
+That's no problem for the `[]`-case, but it would mean that we have to pattern match on `Ur` in the recursive case, which in turn means the function always evaluates until the final `Ur` produced in the `[]`-case, which would make the function strict in the length of the list.
+
+Now that's all cleared up, here is the small `pack`/`unpack` abstraction I promised:
+-}
+
+repack :: forall f n a. Dupable a => (forall m. n ~ f m => Exists m a) -> Exists n a
+repack f n = unpack (\ @m m -> pack @(f m) (f m) n)
+
+lazyVecFromList1 :: [a] -> Exists n (Vec n (Ur a))
+lazyVecFromList1 [] = pack @Zero VNil
+lazyVecFromList1 (a : as) = repack (VCons (Ur a) . lazyVecFromList1 as)
+
+{- [markdown]
+I'm actually quite surprised the recursive case does not need any type arguments despite `f` only occurring in a constraint.
+
+Now for the laziness test:
 -}
 
 infix 3 `SuchThat`
@@ -252,17 +314,7 @@ data SuchThat a c where
 unSuchThat :: SuchThat a c %1 -> a
 unSuchThat (SuchThat a) = a
 
-lazyVecFromList :: [a] -> Exists n (Vec n (Ur a))
-lazyVecFromList [] n = pack @Zero VNil n
-lazyVecFromList (a : as) n =
-  -- This `unpack` actually unpacks the `Vec` produced by the recursive call, not the one `pack`ed immediately below
-  unpack
-    -- TypeAbstractions syntax
-    ( \ @predN freshPredN ->
-        pack @(Succ predN) (VCons (Ur a) L.$ lazyVecFromList as freshPredN) n
-    )
-
--- bonus example using SuchThat
+-- bonus example example of a function producing an existential value, which also demonstrates the use of `SuchThat`
 vecNonEmpty :: forall n m a. Vec n a %1 -> Exists m (Maybe (Vec (Succ m) a `SuchThat` n ~ Succ m))
 vecNonEmpty VNil = flip lseq Nothing
 vecNonEmpty (VCons @_ @o x xs) = pack @o (Just L.$ SuchThat (VCons x xs))
@@ -276,7 +328,7 @@ lazyVecFromListIsLazy =
     ( \n ->
         unpack
           ( L.fmap (second SomeVec . vecUncons . unSuchThat)
-              . vecNonEmpty (lazyVecFromList (0 : error "second element evaluated") n)
+              . vecNonEmpty (lazyVecFromList1 (0 : error "second element evaluated") n)
           )
     )
     <&> (\(Ur a, _) -> a)
@@ -319,106 +371,92 @@ instance Consumable (Fresh a) where
 {- [markdown]
 </details>
 
-And thus we get our lazy `vecFromList`!
-But what did it cost? (\<insert [Thanos-meme](https://preview.redd.it/what-did-it-cost-everything-v0-6iqdlya6n9161.png?width=1080&crop=smart&auto=webp&s=05f747638b1524811324eb29c0c6435404930287)\>)
-* `lazyVecFromList` is linear, which means the produced vector must be consumed linearly. It must be linear because if it would produce `Ur (Vec n a)` it would have to pattern-match that `Ur` in the recursive call, which in turn means the function always evaluates until the final `Ur` produced in the `VNil` case.
-* The above makes the test that `lazyVecFromList` is in fact lazy quite tricky. The only way to discard the tail of vector is to let it escape the top-level `unpack` through a wrapper (`SomeVec` in this case) we don't have to pattern match on after (because that will again require is to consume it tail linearly). That last bit excludes letting the entire vector escape through `SomeVec`. We also can't use [`consume`](https://hackage-content.haskell.org/package/linear-base-0.7.0/docs/Data-Unrestricted-Linear.html#v:consume) because it is strict for vectors, so it would evaluate the `error "second element evaluated"`.
-* Because we have to wrap the tail in `SomeVec`, we have to `vecUncons` the vector, which introduces another existential variable
-* That also introduces a `SuchThat` that we just have to discard (I could have left it out, but it felt wrong not to include it in `vecUncons`)
-* Generally, all the `pack` and `unpacking` introduces a lot of verbosity
+And thus we prove the laziness of `lazyVecFromList1`.
+[But what did it cost?](https://preview.redd.it/what-did-it-cost-everything-v0-6iqdlya6n9161.png?width=1080&crop=smart&auto=webp&s=05f747638b1524811324eb29c0c6435404930287)
+  * As explained before, we must consume the vector produced by `lazyVecFromList1` linearly, which means we can't simply pattern match and discard the tail (because the tail of `Vec` is a linear field). We also can't use [`consume`](https://hackage-content.haskell.org/package/linear-base-0.7.0/docs/Data-Unrestricted-Linear.html#v:consume) because it is strict for vectors, so it would evaluate the `error "second element evaluated"`. Instead we must transform the first `VCons` to a data structure of which the fields are linear when used in a linear context, but unrestricted when used in an unrestricted context. This magical data structure is a tuple, and we get it from `vecUncons`.
+  * To use `vecUncons`, we need a vector that contains at least one element, which we get from `vecNonEmpty`. That also introduces a `SuchThat` which we simply discard (I could have left it out of the definition of `vecNonEmpty` to simplify a little bit, but it felt wrong not to include it and would be a waste of an opportunity to demonstrate it.)
+  * Additionally, we need to fall back to the GADT-wrapper workaround for existential types (i.e. `SomeVec`) to let the tail of the vector escape the `unpack`.
+  * Generally, the 2 `unpacks` make the whole thing pretty verbose.
 
 And I haven't even mentioned the general inconveniences of working with linear types:
-  * There is no multiplicity inference yet. In other words, even if a function from a library is linear, we need to redefine it to get a linear type for it.
-  * The error messages don't say exactly a value is not used linearly, only which one.
+  * There is no multiplicity inference yet. This means that most existing Haskell code is unusable, even if the implementation of a function is actually linear.
+  * The error messages don't say where a value is not used linearly, only which variable.
   * All the other limitations mentioned in the [docs](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/linear_types.html#limitations).
 
-To be honest, the fact that "lazily" discarding the tail of the vector it so hard makes me doubt if I can really this technique safe.
-The only reason we can lazily discard it, is that we never actually use the `Dupable r` constraint that `unpack` requires.
-If you'd write a `Dupable` instance that just produces `error "this is never used anyway"`, you'd get away with it and produce all kinds of incorrect behaviour as demonstrated by the `conflict` example from before.
-Though at that point: is it really my responsibility?
+So while this linear-existentiality-witness-techinique allows some things that are not possible with the existing existential-type-workarounds, I can't recommend using it outside of cases that are very limited in scope like `lazyVecFromList1`.
 
-Furthermore, the premise of the linear arrow in `Exists` *is* upheld: we can not evaluate the `(Ur a, Somevec (Ur a))` value without evaluating the `Fresh`-value.
-
-One alternative to the `Dupable` constraint I came up with is use the property of `Fresh`-values that the `a` in `Fresh a` is always existential.
-This means you need a GADT to capture it, and we can prevent those from occurring in `r` by requiring some class `NonExistential` for `r` from which the methods are hidden (so other modules can't define instances) and provide instances for the generic types from [`GenericK`](https://hackage.haskell.org/package/kind-generics-0.5.0.0/docs/Generics-Kind.html#t:GenericK) from `kind-generics`, except for [`Exists`](https://hackage.haskell.org/package/kind-generics-0.5.0.0/docs/Generics-Kind.html#t:Exists).
-The `kind-generics` package implements `Generic` for GADTs, so doing the above would allow all values to escape `unpack` except those that have existential fields.
-I think forbidding existential fields is even more limiting that `Dupable` though.
-For example, we need `SomeVec` to check the laziness of `lazyVecFromList` and `SomeVec` has an existential field, so we would not be able to implement the check.
-Then again, that issue could also be solved by implementing affine types (like linear types, but without requiring the value on the left of the arrow to be used at least once).
-
-So while this linear-existentiality-witness-techinique allows some things that are not possible with the existing existential-type-workarounds, I can't recommend using it outside of cases that are very limited in scope like `lazyVecFromList`.
-
-Luckily, we can define a `lazyVecFromList` that hides all of the linear-types complexity and falls back to one of the existing workarounds:
+Luckily, we can define a `lazyVecFromList` that hides all of the linear-types complexity and falls back to GADT-wrapper workaround:
 -}
 
 lazyVecFromList2 :: [a] -> SomeVec a
 lazyVecFromList2 xs =
-  unpack (SomeVec . lazyVecFromList xs)
+  unpack (SomeVec . lazyVecFromList1 xs)
     & \(SomeVec vec) -> SomeVec $ L.fmap unur vec
 
 {- [markdown]
 
 ## Invisible type preservation with linear control functors
 
-I discovered the trick above almost 2 years ago.
+*I discovered the trick above almost 2 years ago.*
+
 I put it on GitHub, but never mentioned it because I had not yet succeeded in my actual goal: to make a safe version of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
 The hard thing about this is that to enable it to change the types of the foci of the argument `Traversable`, we need to ensure that the lists in the focus of `partsOf` are of the same length, and at the same time, this length cannot be known by the caller.
 In other words, a perfect use case for existential types where a rank-2-type or GADT-wrapper wouldn't work.
 I thought I could use the trick with a linear `Fresh`, but when I tried it `partsOf :: Functor f => Traversing (->) f s t a b -> Fresh n %1 -> LensLike f s t (Vec n (Ur a)) (Vec n (Ur b))`, the fact that the resulting optic must be used linearly, makes it just as unusable as the rank-2-type version.
 
 To be clear, if you unfold the `LensLike f s t (Vec n a) (Vec n b)` to `(forall n. Vec n a -> f (Vec n b)) -> s -> f t` (i.e. use a rank-2-type), you can implement `partsOf` just fine, but this optic can't be used function like `traverseOf` or pre-composed with other optics with `.`.
-For a long time, I banged my head against the wall trying to think of a way to make a type-changing `partsOf` that would be compatible with the rest of the `lens` package, but I've finally given up.
-I think it's impossible.
+For a long time, I banged my head against the wall trying to think of a way to make a type-changing `partsOf` that would be compatible with the rest of the `lens` package, and so the project stayed on my list of things to get back to at some point.
+It's somewhat regrettable that I didn't just publish the first part of this article anyway, but on the other hand I found quite a few serious mistakes when I came back to it, so I'm also happy I caught those before publishing.
 
-However, we *can* solve the `.`-pre-composition issue with linear optics, which the rest if this section will demonstrate.
+I now think making a safe type-changing `partsOf` that is compatible with all the functions from `lens` is impossible, but I did find a way to solve the `.`-pre-composition issue, again using linear functions
+The rest of this section is dedicated to this technique.
 
-The first idea to make this work is that instead of having an existential type `n` for the length of the vector exposed in the type signature of `partsOf`, we hide it using a type called `WitnessIndexed`, so the focus type of the optic becomes `WitnessIndexed Vec a`.
+The first idea to make this work is that instead of having an existential type `n` for the length of the vector exposed in the type signature of `partsOf`, we hide it using a type called `ExistentiallyIndexed`, so the focus type of the optic becomes something like `ExistentiallyIndexed Vec a`.
 The second idea is that a function that takes a value `Witness x`, with `x` universally quantified and no other sources of any `Witness` in scope, and which must produce some `Witness y` value, with `y` existentially quantified, can only return the original `Witness x` value. Thus we can infer `y ~ x`.
 I don't have a formal proof of this either, but hopefully it will become clear when I show the implementation.
 
-Let's start with a definition for `WitnessIndexed`.
+Let's start with a definition for `ExistentiallyIndexed`.
 We don't want it to be specific to vectors, or even types with kind `k -> Type -> Type`.
 We will use the kind-heterogeneous type-level lists from `kind-apply`, named [`LoT`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t:LoT) and the operator [`:@@:`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t::-64--64-:) which applies a type level list to a type constructor.
-This permits the following definition of `WitnessIndexed`:
+This permits the following definition of `ExistentiallyIndexed`:
 -}
 
 data Witness x = Witness -- constructor would normally be hidden
 
-data WitnessIndexed f xs where
-  WitnessIndexed :: Witness y %1 -> f y :@@: xs -> WitnessIndexed f xs -- Note the linear arrow for `Witness x`
+data ExistentiallyIndexed f xs where
+  ExistentiallyIndexed :: Witness y %1 -> f y :@@: xs -> ExistentiallyIndexed f xs -- Note the linear arrow for `Witness x`
 
 {- [markdown]
-Now we can make the functions meant in the second idea concrete. An example would be a function with type `forall x. Witness x -> Some g ys`.
-Let's consider the ways a function can produce values of `WitnessIndexed g ys` (without unsafe functions).
-Producing `WitnessIndexed` requires a `Witness` value, so we must consider the ways of obtaining this.
+Now we can make the functions meant in the second idea concrete. An example would be a function with type `forall x y. Witness x -> Exists y (Witness y)`.
+Let's consider the ways a function can produce values of `Exists y (Witness y)` (without unsafe functions).
 Since there are no other sources of `Witness` in scope, the only way to obtain a `Witness` value is from the argument of the function.
-Because the `Witness y` in the produced `WitnessIndexed` must be the original `Witness x`, the `y` in `g y :@@: xs` in the `WitnessIndexed` must be equal to `x`.
+Hence we have `x ~ y`.
 
 QED.
 
-Now let's extend this slightly by allowing the function to take additional arguments, e.g. `forall x. Witness x -> g y :@@: xs -> Some g ys`.
+Now let's extend this slightly by allowing the function to take and produce additional values, e.g. `forall x f g xs ys. Witness x -> f x :@@: xs -> ExistentiallyIndexed g ys`.
 This adds a potential source of `Witness` values, since `f` is universally quantified.
-To make it impossible for Witness values to be passed to the function through the additional argument, we must make it impossible for the given value to appear in the result anywhere else then in the first argument of `WitnessIndexed`.
-This is relatively easy to achieve by making the arrow that takes `Witness x` linear, i.e. `forall x. Witness x -> g y :@@: xs -> Some g ys`.
+To make it impossible for Witness values to be passed to the function through the additional argument, we must make it impossible for the given value to appear in the result anywhere else then in the first field of `ExistentiallyIndexed`.
+This is relatively easy to achieve by making the arrow that takes `Witness x` linear, i.e. `forall x f g xs ys. Witness x %1 -> f x :@@: xs -> ExistentiallyIndexed g ys`.
 
 This only allow us to make `Setter` optics though, which is a bit disappointing.
-We need to extend the "proof" further to allow functions that produce a functorial context of `WitnessIndexed`, like `forall x. Witness x -> g y :@@: xs -> h (Some g ys)`.
-This is tricky because `h` is universally quantified and could be chosen to be something like
+We need to extend the "proof" further to allow functions that produce a functorial context of `ExistentiallyIndexed`, like `forall x f g h xs ys. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`.
+This is tricky because `h` is also universally quantified and could be chosen to be something like
 -}
 
 data ConstWitness a where
   ConstWitness :: Witness x %1 -> ConstWitness a
 
 {- [markdown]
-which would allow the Witness value to enter `forall x. Witness x -> g y :@@: xs -> h (Some g ys)`-functions elsewhere.
-To prevent this, we need to require `h (WitnessIndexed f x)` to contain at least one `WitnessIndexed f x` which requires the `Witness`.
+which would allow the Witness value to enter `Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`-functions elsewhere, e.g. through `f x :@@: xs`.
+To prevent this, we need to require `h (ExistentiallyIndexed f x)` to contain at least one `ExistentiallyIndexed f x` which requires the `Witness`.
 Luckily, a solution for this already exists: linear control functors.
 I'd never heard about them before this project and I only ran into them because I was confused which `Functor` module from `linear-base` I needed to import.
 I'd recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/) on them if you're unfamiliar, but I'll also briefly explain here.
 
 In short, in the linear world, there are 2 types of functors: data functors and control functors.
 The type of `Control.Functor.Linear.fmap` is `(a %1 -> b) %1 -> f a %1 -> f b`.
-The key difference with data functors is that a control functors consumes it's argument function linearly (`%1` on the second arrow) while data functors don't.
+The key difference with data functors is that a control functor consumes it's argument function linearly (`%1` on the second arrow) while data functors don't.
 Thus, only functors that contain their argument type exactly once can be control functors.
 For example `State` and `IO` are control functors, while `[]` and `Const` aren't.
 
@@ -428,36 +466,36 @@ Let's finally write a function that makes use of all these properties:
 
 withWitness
   :: forall h f g xs ys a
-   . (Linear.Control.Functor h, Functor h) -- For some reason, the normal non-linear Functor is not a superclass of Linear.Control.Functor.
-  => (forall x. Witness x %1 -> f x :@@: xs -> h (WitnessIndexed g ys))
+   . (Linear.Control.Functor h, Functor h) -- For some reason, the normal non-linear Functor is not a superclass of Linear.Control.Functor, so we need to add both.
+  => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
   -> f a :@@: xs
   -> h (g a :@@: ys)
-withWitness f x = f @a Witness x <&> \(WitnessIndexed Witness y) -> unsafeCoerce y
+withWitness f x = f @a Witness x <&> \(ExistentiallyIndexed Witness y) -> unsafeCoerce y
 
 {- [markdown]
-I think this `unsafeCoerce` is safe due to the limitations described above.
-Just like with `pack`, f you can find a way to break it, please let me know!
+I think this `unsafeCoerce` is safe due to the restrictions described above.
+Just like with `unpack`, if you can find a way to break it, please let me know!
 
-Due to the type families, this function is hopelessly ambiguous (as in almost none of the type variables can be inferred from it's usage, thus required `AllowAmbiguousTypes`).
+Due to the type families, this function is hopelessly ambiguous (as in almost none of the type variables can be inferred from it's usage).
 Let's make it a bit easier to use and demonstrate conversion between rank-2 based existentials:
 -}
 
 expose
   :: forall x h f g xs ys
    . (Linear.Control.Functor h, Functor h)
-  => (WitnessIndexed f xs %1 -> h (WitnessIndexed g ys)) -> f x :@@: xs -> h (g x :@@: ys)
-expose f = withWitness @_ @f @g @xs @ys @x $ \w x -> f (WitnessIndexed w x)
+  => (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+expose f = withWitness @_ @f @g @xs @ys @x $ \w x -> f (ExistentiallyIndexed w x)
 
 hide
   :: forall h f g xs ys
    . (Linear.Control.Functor h, Functor h) -- This use of Linear.Control.Functor is actually independent from the one guaranteeing safety in `withWitness`. This function uses it to actually move the received Witness into h.
   => (forall x. f x :@@: xs -> h (g x :@@: ys))
-  -> WitnessIndexed f xs
-  %1 -> h (WitnessIndexed g ys)
-hide f (WitnessIndexed @x w x) = Linear.Control.fmap (\(Ur y) -> WitnessIndexed w y) L.$ Ur <$> f @x x
+  -> ExistentiallyIndexed f xs
+  %1 -> h (ExistentiallyIndexed g ys)
+hide f (ExistentiallyIndexed @x w x) = Linear.Control.fmap (\(Ur y) -> ExistentiallyIndexed w y) L.$ Ur <$> f @x x
 
 {- [markdown]
-The function `expose` exposes the existential type hidden in `WitnessIndexed`, while `hide` hides a type in `WitnessIndexed`.
+The function `expose` exposes the existential type hidden in `ExistentiallyIndexed`, while `hide` hides a type in `ExistentiallyIndexed`.
 Now we can move on to the optics bit.
 -}
 
@@ -469,15 +507,17 @@ instance Functor (Vec n) where
   fmap _ VNil = VNil
   fmap f (VCons a as) = VCons (f a) (fmap f as)
 
+-- Like `LensLike`, but it preserves the hidden index in the foci.
 type PreservingLensLike h s t f xs g ys =
-  (Linear.Control.Functor h, Functor h) => Lens.Over (FUN One) h s t (WitnessIndexed f xs) (WitnessIndexed g ys) -- = (WitnessIndexed f xs %1 -> h (WitnessIndexed g ys)) -> s -> h t
+  (Linear.Control.Functor h, Functor h) => Lens.Over (FUN One) h s t (ExistentiallyIndexed f xs) (ExistentiallyIndexed g ys) -- = (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> s -> h t
 
 partsOf
   :: (Linear.Control.Functor f, Functor f)
   => Lens.Traversing (->) f s t a b -> PreservingLensLike f s t Vec (LoT1 a) Vec (LoT1 b)
 partsOf o f s =
-  lazyVecFromList2 (ins b)
+  lazyVecFromList2 (ins b) -- Surprise! We actually need `lazyVecFromList2` to make `partsOf` lazy.
     & \(SomeVec @n v) ->
+      -- `unsafeOuts` should be safe because `f` preserves the length of the vector.
       unsafeOuts b . vecToList <$> expose @n f v
  where
   b = o Lens.sell s
@@ -493,7 +533,7 @@ pTraverseOf
   -> h t
 pTraverseOf o f = o $ hide $ \ @n -> f @n
 
--- This replaces all the `Char`s in a `[Either Char String]` with a `String` consisting of all the `Char`s in the list.
+-- This replaces all the `Char`s in a `[Either Bool Char]` with a `String` consisting of all the `Char`s in the list.
 demo1 :: [Either Bool String]
 demo1 =
   runIdentity $
@@ -502,14 +542,17 @@ demo1 =
       (\chars -> Identity $ fmap (const $ vecToList chars) chars)
       [Left True, Right 'h', Left False, Right 'i']
 
--- >>> demo
--- This causes a segfault in HLS and GHCi. Will create an issue later.
+-- >>> demo1
+-- This also segfaults in HLS and GHCi.
 
 -- main = print demo1
 -- prints [Left True,Right "hi",Left False,Right "hi"]
 
 {- [markdown]
-I'll admit, the demo is not the most useful application, but the point is that this shows how `partsOf` allows one to work over each element of a traversal with the context of all visited elements.
+I'll admit, the demo is a bit contrived, but the point is that this shows how `partsOf` allows one to work over each element of a traversal with the context of all visited elements.
+I also don't know the internals of `lens` well enough to say that this is the best way to implement `partsOf`.
+I just took the current implementation and added conversions to and from vectors, but maybe there's a way to make the `Bazaar` use vectors directly or something like that.
+
 And I lied.
 The type-changing `partsOf` was not my actual goal.
 I need it for something I plan to write an article about later™.
@@ -518,34 +561,7 @@ I need it for something I plan to write an article about later™.
 Something else worth noting about the code block above is that we can actually define `PreservingLensLike` using an existing type from `lens`.
 Some optic combinators already abstract over the profunctor in the optics transformation, so some combinators like [`taking`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:taking) and [`failing`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:failing) should also work with "preserving" optics.
 
-Speaking of standard optics, wouldn't it be nice if we could use them on `WitnessIndexed` and compose them with preserving optics?
--}
-
-hidden
-  :: forall f s t xs ys a b
-   . (Linear.Control.Functor f, Functor f)
-  => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
-  -> (a -> f b)
-  -> WitnessIndexed s xs
-  %1 -> f (WitnessIndexed t ys)
-hidden o f = hide $ \ @n -> o @n f
-
-demo2 :: [Either Bool Char]
-demo2 =
-  runIdentity $
-    Lens.traverseOf
-      (partsOf (Lens.traversed . Lens._Right) . hidden (Lens.ix 1)) -- Can't use normal `fin` because `runBatching` does not provide `KnownNat n`
-      (Identity . toUpper)
-      [Left True, Right 'h', Left False, Right 'i']
-
--- main = print demo2
--- prints [Left True,Right 'h',Left False,Right 'I']
-
-{- [markdown]
-
-<details>
-<summary>Required orphans</summary>
-
+Speaking of standard optics, wouldn't it be nice if we could use them on `ExistentiallyIndexed` and compose them with preserving optics?
 -}
 
 type instance Lens.Index (Vec n a) = Int
@@ -556,11 +572,30 @@ instance Lens.Ixed (Vec n a) where
   ix i f (VCons a as) = VCons a <$> Lens.ix i f as
   ix _ _ VNil = pure VNil
 
-{- [markdown]
-</details>
+hidden
+  :: forall f s t xs ys a b
+   . (Linear.Control.Functor f, Functor f)
+  => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
+  -> (a -> f b)
+  -> ExistentiallyIndexed s xs
+  %1 -> f (ExistentiallyIndexed t ys)
+hidden o f = hide $ \ @n -> o @n f
 
-As shown we can run standard optics like `Lens.ix` on `WitnessIndexed` foci using the `hidden` combinator.
-Furthermore, we could compose `hidden` with other standard optics (like `hidden (...) . standardOptic`) because the arrow in `(a -> f b)` in `preserving`'s type is not linear nor does it contain a `forall`.
+demo2 :: [Either Bool Char]
+demo2 =
+  runIdentity $
+    Lens.traverseOf
+      (partsOf (Lens.traversed . Lens._Right) . hidden (Lens.ix 1))
+      (Identity . toUpper)
+      [Left True, Right 'h', Left False, Right 'i']
+
+-- main = print demo2
+-- prints [Left True,Right 'h',Left False,Right 'I']
+-- notice how the "i" at the end is now capitalized
+
+{- [markdown]
+As shown we can run standard optics like `Lens.ix` on `ExistentiallyIndexed` foci using the `hidden` combinator.
+And while the example does not show it, you can see from the type of hidden that we could precompose it with standard optics (like `hidden (...) . standardOptic`), because the arrow in `(a -> f b)` in `hidden`'s type is not linear.
 
 Finally, I'd also like to show how to define `Getter`s for preserving optics, because such a thing was not possible with some of my failed ideas for preserving optics.
 -}
@@ -576,8 +611,16 @@ pView :: PreservingGetter (Some f xs) s f xs -> s -> Some f xs
 pView o s = NL.fst $ o (hide (\ @x x -> (Some @x x, x))) s
 
 {- [markdown]
-## Conclusion
+## Wrapping up
 
-library
+The purpose of this article is put these ideas out there and see if someone sees any safety issues that I have overlooked.
+As I mentioned in the introduction, you can play with the code in your browser using todo.
+If you find something, please create a an issue [on GitHub](https://github.com/cdfa/existentials-on-a-leash/issues).
 
+If no serious issues are found, I'll publish a small library containing the core types and functions to Hackage after a few weeks.
+In the mean time, I'll continue working on the other optics I needed these techniques for.
+
+Thanks for reading and have fun experimenting!
+
+~cdfa
 -}
