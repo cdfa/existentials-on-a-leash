@@ -8,7 +8,7 @@
       "extraNixConfig": "experimental-features = nix-command flakes,keep-outputs = true,keep-derivations = true"
     }
   },
-  "onCreateCommand": "nix profile install nixpkgs#direnv nixpkgs#nix-direnv && mkdir -p ~/.config/direnv && echo 'source $HOME/.nix-profile/share/nix-direnv/direnvrc' >> ~/.config/direnv/direnvrc && direnv allow && echo 'eval \"$(direnv hook bash)\"' >> ~/.bashrc && direnv exec . '/bin/bash -c \"cabal build existentials-on-a-leash.hs\"'",
+  "onCreateCommand": "nix profile install nixpkgs#direnv nixpkgs#nix-direnv && mkdir -p ~/.config/direnv && echo 'source $HOME/.nix-profile/share/nix-direnv/direnvrc' >> ~/.config/direnv/direnvrc && direnv allow && echo 'eval \"$(direnv hook bash)\"' >> ~/.bashrc && direnv exec . bash -c 'cabal build existentials-on-a-leash.hs'",
   "waitFor": "onCreateCommand",
   "customizations": {
     "vscode": {
