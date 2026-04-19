@@ -1,7 +1,3 @@
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE LinearTypes #-}
-{-# LANGUAGE TypeAbstractions #-}
-{-# LANGUAGE TypeFamilies #-}
 {- [markdown]
 # Existentials on a leash
 
@@ -41,6 +37,10 @@ The main thing to remember is that we use `L` and `NL` to disambiguate linear an
 
 -}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures -Wno-unused-top-binds -Wno-orphans #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE LinearTypes #-}
+{-# LANGUAGE TypeAbstractions #-}
+{-# LANGUAGE TypeFamilies #-}
 
 {- cabal:
 ghc-options: -Wall
@@ -247,7 +247,7 @@ Well, only if `Dupable r` is a faithful instance of `Dupable`.
 If you implement `dup` as `error "this is never used anyway"` for a linearly captured function, you could still write the `conflict` expression from before and you'd get away with it.
 We could have `unpack` call `dup` to verify this does not happen, but that would make it so strict that it becomes useless for implementing a lazy `vecFromList`.
 
-Alternatively, we could define a closed type family `ClosedDupable` which uses [`RepK`](todo) from `kind-generics` to see if the representation of a type contains a linear function field (if you don't know `kind-generics`, it extends the language of `GHC.Generics` such that GADTs can also get a generic representation).
+Alternatively, we could define a closed type family `ClosedDupable` which uses [`RepK`](https://hackage.haskell.org/package/kind-generics-0.5.0.0/docs/Generics-Kind.html#t:RepK) from `kind-generics` to see if the representation of a type contains a linear function field (if you don't know `kind-generics`, it extends the language of `GHC.Generics` such that GADTs can also get a generic representation).
 The drawback here is that this requires users to derive `RepK` using template haskell or define it manually, and I don't think that's worth the extra safety.
 
 Another alternative I'v considered is to use the property of `Fresh`-values that the `a` in `Fresh a` is always existential.

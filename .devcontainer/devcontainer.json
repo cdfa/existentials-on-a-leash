@@ -1,27 +1,14 @@
 {
-  "dockerFile": "Dockerfile",
-  "context": "${localWorkspaceFolder}",
-  "build": {
-    "args": {
-      "USER_UID": "${localEnv:USER_UID}",
-      "USER_GID": "${localEnv:USER_GID}"
+  "image": "mcr.microsoft.com/devcontainers/base:alpine",
+  "features": {
+    "ghcr.io/devcontainers/features/nix:1": {
+      "multiUser": true,
+      "version": "latest",
+      // Needed for flakes & nix-direnv:
+      "extraNixConfig": "experimental-features = nix-command flakes,keep-outputs = true,keep-derivations = true"
     }
   },
-  "mounts": [
-    {
-      "source": "existentials-on-a-leash-nix",
-      "target": "/nix",
-      "type": "volume"
-    }
-  ],
-  "runArgs": [
-    "--security-opt",
-    "label=disable"
-  ],
-  "overrideCommand": false,
-  "userEnvProbe": "loginShell",
-  "updateRemoteUserUID": false,
-  "onCreateCommand": "direnv exec . /bin/bash -c 'nix-collect-garbage --delete-old; nix-store --optimise; echo done building nix dev environment'",
+  "onCreateCommand": "nix profile install nixpkgs#direnv nixpkgs#nix-direnv && mkdir -p ~/.config/direnv && echo 'source $HOME/.nix-profile/share/nix-direnv/direnvrc' >> ~/.config/direnv/direnvrc && direnv allow && echo 'eval \"$(direnv hook bash)\"' >> ~/.bashrc && direnv exec . '/bin/bash -c \"cabal build existentials-on-a-leash.hs\"'",
   "waitFor": "onCreateCommand",
   "customizations": {
     "vscode": {
