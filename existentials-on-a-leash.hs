@@ -308,9 +308,10 @@ Now for the laziness test:
 -}
 
 lazyVecFromListIsLazy :: Maybe Int
-lazyVecFromListIsLazy = unpack (SomeVec . lazyVecFromList1 (0 : error "second element evaluated")) & \case
-  (SomeVec (VCons (Ur a) _)) -> Just a
-  _ -> Nothing
+lazyVecFromListIsLazy =
+  unpack (SomeVec . lazyVecFromList1 (0 : error "second element evaluated")) & \case
+    (SomeVec (VCons (Ur a) _)) -> Just a
+    _ -> Nothing
 
 -- >>> lazyVecFromListIsLazy
 -- Just 0
@@ -380,11 +381,12 @@ demo0 =
     ( \n ->
         unpack
           ( \m ->
-            let
-              !(v1, v2) = dup L.$ lazyVecFromList1 [0..3] n
-            in case vecNonEmpty v1 m of
-              Just (SuchThat v3) -> lseq v3 L.$ Just L.$ second SomeVec L.$ vecUncons v2 -- we can use v2 here since we have `n ~ Succ m` from `vecNonEmpty`!
-              Nothing -> lseq v2 Nothing
+              let
+                !(v1, v2) = dup L.$ lazyVecFromList1 [0 .. 3] n
+              in
+                case vecNonEmpty v1 m of
+                  Just (SuchThat v3) -> lseq v3 L.$ Just L.$ second SomeVec L.$ vecUncons v2 -- we can use v2 here since we have `n ~ Succ m` from `vecNonEmpty`!
+                  Nothing -> lseq v2 Nothing
           )
     )
 
@@ -440,23 +442,24 @@ This permits the following definition of `ExistentiallyIndexed`:
 -}
 
 data Witness x = Witness -- consider the constructor hidden
+  deriving (Show)
 
 data ExistentiallyIndexed f xs where
   ExistentiallyIndexed :: Witness y %1 -> f y :@@: xs -> ExistentiallyIndexed f xs -- Note the linear arrow for `Witness x`
-{- [markdown]
-Now we can make the functions meant in the second idea concrete. An example would be a function with type `forall x y. Witness x -> Exists y (Witness y)`.
-Since there are no other sources of `Witness` in scope, the only way to obtain a `Witness` value is from the argument of the function.
-Hence we can derive `x ~ y`.
+  {- [markdown]
+  Now we can make the functions meant in the second idea concrete. An example would be a function with type `forall x y. Witness x -> Exists y (Witness y)`.
+  Since there are no other sources of `Witness` in scope, the only way to obtain a `Witness` value is from the argument of the function.
+  Hence we can derive `x ~ y`.
 
-Now let's extend this "proof" slightly by allowing the function to take and produce additional values, e.g. `forall x f g xs ys. Witness x -> f x :@@: xs -> ExistentiallyIndexed g ys`.
-This adds a potential source of `Witness` values, since `f` is universally quantified.
-To make it impossible for Witness values to be passed to the function through the additional argument, we must make it impossible for the given value to appear in the result anywhere else than in the first field of `ExistentiallyIndexed`.
-This is relatively easy to achieve by making the arrow that takes `Witness x` linear, i.e., `forall x f g xs ys. Witness x %1 -> f x :@@: xs -> ExistentiallyIndexed g ys`.
+  Now let's extend this "proof" slightly by allowing the function to take and produce additional values, e.g. `forall x f g xs ys. Witness x -> f x :@@: xs -> ExistentiallyIndexed g ys`.
+  This adds a potential source of `Witness` values, since `f` is universally quantified.
+  To make it impossible for Witness values to be passed to the function through the additional argument, we must make it impossible for the given value to appear in the result anywhere else than in the first field of `ExistentiallyIndexed`.
+  This is relatively easy to achieve by making the arrow that takes `Witness x` linear, i.e., `forall x f g xs ys. Witness x %1 -> f x :@@: xs -> ExistentiallyIndexed g ys`.
 
-This only permits `Setter` optics though, which is a bit disappointing.
-We need to extend the "proof" further to allow functions that produce a functorial context of `ExistentiallyIndexed`, like `forall x f g h xs ys. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`.
-This is tricky because `h` is also universally quantified and could be chosen to be something like
--}
+  This only permits `Setter` optics though, which is a bit disappointing.
+  We need to extend the "proof" further to allow functions that produce a functorial context of `ExistentiallyIndexed`, like `forall x f g h xs ys. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`.
+  This is tricky because `h` is also universally quantified and could be chosen to be something like
+  -}
 
 data ConstWitness a where
   ConstWitness :: Witness x %1 -> ConstWitness a
@@ -473,38 +476,109 @@ The key difference with data functors is that a control functor consumes its arg
 Thus, only functors that contain their argument type exactly once can be control functors.
 For example `State` and `IO` are control functors, while `[]` and `Const` aren't.
 
-This gives us exactly what we need.
-Let's finally write a function that makes use of the "proof":
+In a strict programming language, the above would be enough.
+To show why it is not, I first need to write a function that actually uses the "proof":
 -}
 
-withWitness
+preserving0
   :: forall h f g xs ys a
    . (Linear.Control.Functor h, Functor h) -- The normal non-linear Functor is not a superclass of Linear.Control.Functor, so we need to add both.
   => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
   -> f a :@@: xs
   -> h (g a :@@: ys)
-withWitness f x = f @a Witness x <&> \(ExistentiallyIndexed Witness y) -> unsafeCoerce y
-{- [markdown]
-I think this `unsafeCoerce` is safe due to the restrictions described above.
-Just like with `unpack`, if you can find a way to break it, please let me know!
+preserving0 f x = f @a Witness x <&> \(ExistentiallyIndexed Witness y) -> unsafeCoerce y
 
-Due to the type families, this function is hopelessly ambiguous (as in: almost none of the type variables can be inferred from its usage).
+problem =
+  fst $
+    preserving0 @((,) (ExistentiallyIndexed Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
+      (\w l -> (ExistentiallyIndexed w l, error "The consequences of my actions"))
+      VNil
+
+-- very specific simple Show instance for the purpose of this example
+instance Show a => Show (ExistentiallyIndexed Vec (LoT1 a)) where
+  show (ExistentiallyIndexed w x) = show (w, x)
+
+-- >>> problem
+-- (Witness,VNil)
+{- [markdown]
+We have successfully ignored the consequences of our actions and thus obtained an unrestricted `Witness`-value!
+That could be abused to cause all sorts of mayhem in other uses of `preserving0`.
+
+As mentioned before, the problem lies with strictness, or rather laziness in this case.
+The caller of `preserving0` can always choose not to evaluate the produced `ExistentiallyIndexed`, and thus the passed witness can escape.
+It's not enough to call `deepseq` on the produced `h (ExistentiallyIndexed g ys)`, because if we take `h` as `State s` for example, `deepseq` would not ensure `g a :@@: ys` is evaluated to weak-head-normal-form before the tuple in the definition of `State` is created (and the `NFData` instance for `a -> b` has been deprecated for a while anyway).
+Moreover, we don't want to force the entire `h (ExistentiallyIndexed g ys)`-value.
+
+We need a `fmap` that allows evaluating a part of the `a` in `f a` to weak-head-normal-form before producing an `f b` (or the result of a function that produces `b` in cases that embed a function like `Linear.Control.StateT s m`).
+It must be "a part of `a`", because if we implement this for `Linear.Control.StateT s m`, we need to recursively apply the function to `m (a, s)`, and we want to evaluate a part of that `a`, not `m`'s "element" (the tuple `(a, s)`).
+
+We'll accomplish this with a new class called `SeqElement` (name is subject to change):
+-}
+-- todo: check linearity of all functions
+class L.Functor f => SeqElement f where
+  mapAndSeq :: Consumable c => (a %1 -> (b, c)) -> f a %1 -> f b
+{- [markdown]
+Let't check that we can indeed define instance for `Linear.Control.StateT s m`, `Identity` and `(,) a` for this.
+-}
+
+instance SeqElement Identity where
+  mapAndSeq extract (Identity a) = extract a & \(b, c) -> lseq c L.$ Identity b
+
+instance SeqElement m => SeqElement (Linear.Control.StateT s m) where
+  mapAndSeq extract (Linear.Control.StateT f) = Linear.Control.StateT L.$ mapAndSeq extract' . f
+   where
+    extract' (a, s) = extract a & \(b, c) -> ((b, s), c)
+
+instance SeqElement ((,) a) where
+  mapAndSeq extract (a, b) = extract b & \(d, c) -> lseq c (a, d)
+{- [markdown]
+So far so good!
+Let's check that this solved our `problem`.
+-}
+
+seqAndMap :: (SeqElement f, Consumable c) => f a %1 -> (a %1 -> (b, c)) -> f b
+seqAndMap = flip mapAndSeq
+
+preserving
+  :: forall h f g xs ys a
+   . (Linear.Control.Functor h, Functor h, SeqElement h)
+  => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
+  -> f a :@@: xs
+  -> h (g a :@@: ys)
+preserving f x = f @a Witness x `seqAndMap` \(ExistentiallyIndexed Witness y) -> (unsafeCoerce y, ())
+
+problemSolved =
+  fst $
+    preserving @((,) (ExistentiallyIndexed Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
+      (\w l -> (ExistentiallyIndexed w l, error "The consequences of my actions"))
+      VNil
+
+-- >>> problemSolved
+-- The consequences of my actions
+{- [markdown]
+Calling a problem "solved" when your function returns an `error` instead of a proper value feels odd, but that's what you get when working with unsafe primitives.
+
+We've been "patching holes" a lot, but I think we've finally neutralized the dangers of the `unsafeCoerce` in `preserving`!
+Still, I'd encourage you to think if there's something I've missed!
+
+Due to the type families, `preserving` is hopelessly ambiguous (as in: almost none of the type variables can be inferred from its usage).
 Let's make it a bit easier to use and demonstrate conversion between rank-2 based existentials:
 -}
 
 expose
   :: forall x h f g xs ys
-   . (Linear.Control.Functor h, Functor h)
+   . (Linear.Control.Functor h, Functor h, SeqElement h)
   => (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> f x :@@: xs -> h (g x :@@: ys)
-expose f = withWitness @_ @f @g @xs @ys @x $ \w x -> f (ExistentiallyIndexed w x)
+expose f = preserving @_ @f @g @xs @ys @x $ \w x -> f (ExistentiallyIndexed w x)
 
 hide
   :: forall h f g xs ys
-   . (Linear.Control.Functor h, Functor h) -- This use of Linear.Control.Functor is actually independent from the one guaranteeing safety in `withWitness`. This function uses it to actually move the received Witness into h.
+   . (Linear.Control.Functor h, Functor h) -- This use of Linear.Control.Functor is actually independent from the one guaranteeing safety in `preserving`. This function uses it to actually move the received Witness into h.
   => (forall x. f x :@@: xs -> h (g x :@@: ys))
   -> ExistentiallyIndexed f xs
   %1 -> h (ExistentiallyIndexed g ys)
 hide f (ExistentiallyIndexed @x w x) = Linear.Control.fmap (\(Ur y) -> ExistentiallyIndexed w y) L.$ Ur <$> f @x x
+
 {- [markdown]
 The function `expose` exposes the existential type hidden in `ExistentiallyIndexed`, while `hide` hides a type in `ExistentiallyIndexed`.
 Now we can move on to the optics bit.
@@ -520,10 +594,11 @@ instance Functor (Vec n) where
 
 -- Like `LensLike`, but it preserves the hidden index in the foci.
 type PreservingLensLike h s t f xs g ys =
-  (Linear.Control.Functor h, Functor h) => Lens.Over (FUN One) h s t (ExistentiallyIndexed f xs) (ExistentiallyIndexed g ys) -- = (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> s -> h t
+  (Linear.Control.Functor h, Functor h)
+  => Lens.Over (FUN One) h s t (ExistentiallyIndexed f xs) (ExistentiallyIndexed g ys) -- = (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> s -> h t
 
 partsOf
-  :: (Linear.Control.Functor f, Functor f)
+  :: (Linear.Control.Functor f, Functor f, SeqElement f)
   => Lens.Traversing (->) f s t a b -> PreservingLensLike f s t Vec (LoT1 a) Vec (LoT1 b)
 partsOf o f s =
   lazyVecFromList (ins b) -- Surprise! We actually need `lazyVecFromList2` to make `partsOf` lazy.
@@ -537,8 +612,8 @@ partsOf o f s =
 
 pTraverseOf
   :: forall xs ys h f g s t
-   . (Applicative h, Linear.Control.Functor h)
-  => (forall m. Applicative m => PreservingLensLike m s t f xs g ys)
+   . (Applicative h, Linear.Control.Functor h, SeqElement h)
+  => (forall m. (Applicative m, Linear.Control.Functor m, SeqElement m) => PreservingLensLike m s t f xs g ys)
   -> (forall x. f x :@@: xs -> h (g x :@@: ys))
   -> s
   -> h t
