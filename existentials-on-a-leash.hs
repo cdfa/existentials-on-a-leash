@@ -11,7 +11,7 @@ Please try to break this stuff if you see some hole I have missed.
 While I will briefly explain what existential types and linear types are, this article is not meant as a general introduction to these language features.
 Familiarity with GADTs, linear types and optics (for the sections pertaining to them) is recommended.
 
-That being said, I made it as easy as I can for the reader to tinker with the code and interactively learn about these concepts by providing a [GitHub Codespace](https://codespaces.new/cdfa/existentials-on-a-leash?quickstart=1) prebuild.
+That being said, I made it as easy as I can for the reader to tinker with the code and interactively learn about these concepts by providing a [GitHub Codespace](https://codespaces.new/cdfa/existentials-on-a-leash?quickstart=1) prebuild (hint: use "Preview embedded markdown" to see the .hs file with its markdown version to the side).
 Clicking that link will allow you to tinker with the code with the support of the Haskell Language Server from a Visual Studio Code instance running in your browser (or from a container on your computer).
 It might even be a nice way to read the article because you can hover over values to see their types for example.
 
