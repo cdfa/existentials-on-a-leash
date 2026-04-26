@@ -655,8 +655,8 @@ type instance Lens.IxValue (Vec n a) = a
 
 instance Lens.Ixed (Vec n a) where
   ix 0 f (VCons a as) = flip VCons as <$> f a
-  ix i f (VCons a as) = VCons a <$> Lens.ix i f as
-  ix _ _ VNil = pure VNil
+  ix i f (VCons a as) = VCons a <$> Lens.ix (pred i) f as
+  ix _ _ VNil = error "a proper `ix` for vectors would use some integral type with an upper bound"
 
 hidden
   :: forall f s t xs ys a b
