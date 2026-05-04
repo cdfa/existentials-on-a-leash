@@ -1,3 +1,7 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE LinearTypes #-}
+{-# LANGUAGE TypeAbstractions #-}
+{-# LANGUAGE TypeFamilies #-}
 {- [markdown]
 # Existentials on a leash
 
@@ -44,10 +48,6 @@ We'll work out the second option, but first we need to enable some language exte
 
 -}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures -Wno-unused-top-binds -Wno-orphans #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE LinearTypes #-}
-{-# LANGUAGE TypeAbstractions #-}
-{-# LANGUAGE TypeFamilies #-}
 
 {- cabal:
 ghc-options: -Wall
@@ -75,7 +75,6 @@ import Control.Lens.Internal.Context qualified as Lens
 import Control.Monad.State.Lazy qualified as NL
 import Data.Bifunctor.Linear
 import Data.Char
-import Data.Functor ((<&>))
 import Data.Functor.Identity
 import Data.Functor.Linear qualified as L
 import Data.Kind
@@ -83,18 +82,21 @@ import Data.List as NL
 import Data.Maybe
 import Data.PolyKinded hiding (Nat)
 import Data.Profunctor.Rep qualified as Lens
+import Data.Replicator.Linear (Replicator, extract)
+import Data.Tuple qualified as NL
 import Data.Type.Equality
 import Data.Unrestricted.Linear
 import GHC.Base (Multiplicity (..), TYPE)
 import Prelude.Linear hiding (fst, ($), (.))
 import Prelude.Linear qualified as L
 import Unsafe.Coerce (unsafeCoerce)
-import Prelude as NL (Applicative (..), Functor (..), fst, ($), (<$>))
+import Prelude as NL (Applicative (..), Functor (..), const, ($), (<$>))
 
 -- Multiplicity polymorphic version of `(.)` which works in most non-linear code as well.
 (.) :: forall {rep} b (c :: TYPE rep) a m n. (b %m -> c) %n -> (a %m -> b) %m -> a %m -> c
 (.) f g x = f (g x)
 infixr 9 .
+
 {- [markdown]
 </details>
 
@@ -116,6 +118,7 @@ vecFromList :: [a] -> SomeVec a
 vecFromList [] = SomeVec VNil
 vecFromList (a : as) =
   vecFromList as & \(SomeVec aVec) -> SomeVec $ VCons a aVec
+
 {- [markdown]
 If you've never seen the `%1` used the definition for `VCons`, you can ignore them for now.
 This marks the fields of the constructor as linear, which will be explained more later.
@@ -128,7 +131,7 @@ The CPS-variant would not help either for a similar reason: the continuation can
 
 As the author of the existential types proposal states for the `filter` function, it's not possible to define a lazy version in GHC's current type system.
 
-*So we have to work around it.*
+\*So we have to work around it.*
 
 ## Putting existentials on a leash
 
@@ -141,6 +144,7 @@ data Fresh0 a = Fresh0
 
 unpack0 :: (forall a. Fresh0 a -> r) -> r
 unpack0 f = f Fresh0
+
 {- [markdown]
 
 This proxy will serve as a proof-witness that the associated type variable was existentially quantified elsewhere in the program.
@@ -162,6 +166,7 @@ newtype Fresh1 a = Fresh1 (forall b. a :~: b)
 
 unpack1 :: (forall a. Fresh1 a -> r) -> r
 unpack1 f = f (Fresh1 $ unsafeCoerce Refl)
+
 {- [markdown]
 
 Using `Data.Type.Equality.castWith`, we can now perform unsafe coercions for any instance of `a` for which we have a `Fresh a`!
@@ -184,6 +189,7 @@ unpack2 f = f L.$ Fresh $ unsafeCoerce Refl
 
 pack :: forall b r a. (a ~ b => r) %1 -> Exists a r
 pack r (Fresh (Refl :: a :~: b)) = r
+
 {- [markdown]
 The `%1` in `type Exists a b = Fresh a %1 -> b` demands that the function is linear.
 This means that the compiler will verify that such a function will evaluate the argument exactly once if the result of the function is evaluated to normal form.
@@ -210,6 +216,7 @@ wrapper =
         Wrapper @a
           (\b -> if b then pack @Int Int fresh else pack @Char Char fresh)
     )
+
 {- [markdown]
 
 ```haskell
@@ -243,6 +250,7 @@ Therefore, it is safe to duplicate a `Dupable` value after it's produced by `unp
 
 unpack :: Dupable r => (forall a. Exists a r) %1 -> r
 unpack f = f L.$ Fresh $ unsafeCoerce Refl
+
 {- [markdown]
 So is this completely safe now?
 Well, only if `Dupable r` is a faithful instance of `Dupable`.
@@ -264,15 +272,16 @@ There are some safer alternatives, but they require more effort from the user an
 Now let's continue and finally define a lazy `vecFromList`:
 -}
 
-lazyVecFromList0 :: [a] -> Exists n (Vec n (Ur a))
+lazyVecFromList0 :: Dupable a => [a] %m -> Exists n (Vec n a)
 lazyVecFromList0 [] n = pack @Zero VNil n
 lazyVecFromList0 (a : as) n =
   -- This `unpack` actually unpacks the `Vec` produced by the recursive call, not the one `pack`ed immediately below
   unpack
     -- TypeAbstractions syntax
     ( \ @predN predN ->
-        pack @(Succ predN) (VCons (Ur a) L.$ lazyVecFromList0 as predN) n
+        pack @(Succ predN) (VCons a L.$ lazyVecFromList0 as predN) n
     )
+
 {- [markdown]
 The manual `pack`ing and `unpack`ing makes the definition adds significant verbosity, but I believe each use is necessary.
 The `pack`s are needed because neither `VNil` nor `VCons` produce vectors of arbitrary length, and we can't remove the `unpack` because we can't use the same `Fresh`-value for coercing the `VCons`.
@@ -285,22 +294,30 @@ That's because linear arrows don't just require that the argument is consumed ex
 They say that if the caller evaluates the produced value to normal form, then the function will evaluate the argument to normal form exactly once.
 So a function `f` that takes a `Fresh`-value in `unpack` and passed it to `lazyVecFromList0` must also treat the produced vector linearly (i.e. use it for the `f`'s result in some way).
 
-You might also have noticed that the produced vector has elements of type `Ur a` instead of just `a`.
-For those unfamiliar with `linear-base`, `Ur` is a very simple type (`data Ur a = Ur a`), which is non-linear in the captured `a`-value.
-This allows linear functions to produce values of which some parts are unrestricted (hence the name `Ur`).
+You might also have noticed that there is a multiplicity polymorphic arrow (`%m ->`) after `[a]` in the type annotation of `lazyVecFromList0`.
+This means that the function can be used as either a linear or a non-linear one.
+We could've used a linear arrow as well, but then we'd have to convert the function to a non-linear one when used in such a context.
+That isn't hard, but it means extra boiler-plate.
 
-It would be much nicer if we could have `lazyVecFromList0 :: [a] -> Exists n (Ur (Vec n a))`.
+As an aside, in an ideal world, the multiplicity of all functions would just be inferred to the strictest possibility.
+Then we wouldn't have to redefine existing functions just to give them a linear or multiplicity-polymorphic type annotation.
+This might never happen, because then even people who don't use linear types pay the computing cost of inferring the linear type.
+Since Haskell people usually compile all dependencies locally anyway, I think there is a way to avoid this where the automatic inference is only enabled for any dependency or dependent module of a module that uses linear types, but that would require some magic on Cabal's side that I don't see happening any time soon.
+
+What's more important is that the linear arrow in `Exists` demands that when the function is called with a linear `Fresh`-value (which is always, due to `unpack` being the only way of getting a `Fresh`), the produced vector is treated linearly as well until it escapes the scope of `unpack`.
+It would be much nicer if we could have `lazyVecFromList0 :: [a] -> Exists n (Ur (Vec n a))`  (where `Ur` (for Unrestricted) is a simple non-linear wrapper for any value).
 That's no problem for the `[]`-case, but it would mean that we have to pattern match on `Ur` in the recursive case, which in turn means the function always evaluates until the final `Ur` produced in the `[]`-case, which would make the function strict in the length of the list.
 
 Now that's all cleared up, here is the small `pack`/`unpack` abstraction I promised:
 -}
 
-repack :: forall f n a. Dupable a => (forall m. n ~ f m => Exists m a) -> Exists n a
+repack :: forall f n a. Dupable a => (forall m. n ~ f m => Exists m a) %1 -> Exists n a
 repack f n = unpack (\ @m m -> pack @(f m) (f m) n)
 
-lazyVecFromList1 :: [a] -> Exists n (Vec n (Ur a))
+lazyVecFromList1 :: Dupable a => [a] %m -> Exists n (Vec n a)
 lazyVecFromList1 [] = pack @Zero VNil
-lazyVecFromList1 (a : as) = repack (VCons (Ur a) . lazyVecFromList1 as)
+lazyVecFromList1 (a : as) = repack (VCons a . lazyVecFromList1 as)
+
 {- [markdown]
 I'm actually quite surprised the recursive case does not need any type arguments despite `f` only occurring in a constraint.
 
@@ -310,7 +327,7 @@ Now for the laziness test:
 lazyVecFromListIsLazy :: Maybe Int
 lazyVecFromListIsLazy =
   unpack (SomeVec . lazyVecFromList1 (0 : error "second element evaluated")) & \case
-    (SomeVec (VCons (Ur a) _)) -> Just a
+    (SomeVec (VCons a _)) -> Just a
     _ -> Nothing
 
 -- >>> lazyVecFromListIsLazy
@@ -348,6 +365,7 @@ instance Consumable (Fresh a) where
 deriving instance Show a => Show (Vec n a)
 deriving instance Show a => Show (SomeVec a)
 deriving instance Show a => Show (Ur a)
+
 {- [markdown]
 </details>
 
@@ -356,6 +374,7 @@ We do need a GADT wrapper to use it though, because otherwise the `Fresh`-variab
 We also can't pattern match inside `unpack` because we have to discard the tail of the vector.
 Inside `unpack` we'd have to do that linearly, which is possible to do with `consume` (from a superclass of `Dupable`), but that would break the test by evaluating the tail to normal form.
 
+-- todo: change title
 ### Constraints on existential type variables
 
 Aside from the `exists` quantifier, the existential types proposal also proposes a type level operator `(/\) :: Constraint -> Type -> Type` that puts constraints on a given type.
@@ -375,7 +394,7 @@ vecNonEmpty (VCons @_ @o x xs) = pack @o (Just L.$ SuchThat (VCons x xs))
 vecUncons :: Vec (Succ n) a %1 -> (a, Vec n a)
 vecUncons (VCons a as) = (a, as)
 
-demo0 :: Maybe (Ur Integer, SomeVec (Ur Integer))
+demo0 :: Maybe (Integer, SomeVec Integer)
 demo0 =
   unpack
     ( \n ->
@@ -394,7 +413,7 @@ demo0 =
 -- This segfaults in HLS and GHCi. Will create an issue later.
 
 -- main = print demo0
--- prints "Just (Ur 0,SomeVec (VCons (Ur 1) (VCons (Ur 2) (VCons (Ur 3) VNil))))"
+-- prints "Just (0,SomeVec (VCons 1 (VCons 2 (VCons 3 VNil))))"
 {- [markdown]
 This demo is a bit contrived because I wanted to use the `n ~ Succ m` explicitly and linear types force the explicit duplication and consumption of values, but I think the point should be clear: no explicit type annotations outside those of functions signatures were needed to make GHC resolve all constraints correctly!
 
@@ -411,10 +430,12 @@ Luckily, we can define a `lazyVecFromList` that hides all of the linear-types co
 
 lazyVecFromList :: [a] -> SomeVec a
 lazyVecFromList xs =
-  unpack (SomeVec . lazyVecFromList1 xs)
-    & \(SomeVec vec) -> SomeVec $ L.fmap unur vec
+  unpack (SomeVec L.. lazyVecFromList1 (fmap Ur xs))
+       & \(SomeVec vec) -> SomeVec $ L.fmap unur vec
+
 {- [markdown]
 
+todo: title
 ## Invisible type preservation with linear control functors
 
 *I discovered the trick above almost 2 years ago.*
@@ -422,7 +443,7 @@ lazyVecFromList xs =
 I put it on GitHub, but never mentioned it because I had not yet succeeded in my actual goal: to make a safe version of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
 The hard thing about this is that to enable it to change the types of the foci of the argument `Traversable`, we need to ensure that the lists in the focus of `partsOf` are of the same length, while at the same time, this length cannot be known by the caller.
 Because I wanted the optic to be compatible with the existing `lens` ecosystem, a rank-2-type or GADT-wrapper wouldn't work.
-I thought I could use the linear-existentiality-witness-techinique , but when I tried it in `partsOf :: Functor f => Traversing (->) f s t a b -> Fresh n %1 -> LensLike f s t (Vec n (Ur a)) (Vec n (Ur b))`, the fact that the resulting optic must be used linearly, makes it just as incompatible with `lens` as the rank-2-type version.
+I thought I could use the linear-existentiality-witness-techinique , but when I tried it in `partsOf :: Functor f => Traversing (->) f s t a b -> Fresh n %1 -> LensLike f s t (Vec n a) (Vec n b)`, the fact that the resulting optic must be used linearly, makes it just as incompatible with `lens` as the rank-2-type version.
 
 To be clear, if you unfold the `LensLike f s t (Vec n a) (Vec n b)` to `(forall n. Vec n a -> f (Vec n b)) -> s -> f t` (i.e. use a rank-2-type), you can implement `partsOf` just fine, but this optic can't be used in functions like `traverseOf` or pre-composed with other optics with `.`.
 For a long time, I banged my head against the wall trying to think of a way to make a type-changing `partsOf` that would be compatible with the rest of `lens`, and so the project stayed on my list of things to get back to at some point.
@@ -463,6 +484,7 @@ data ExistentiallyIndexed f xs where
 
 data ConstWitness a where
   ConstWitness :: Witness x %1 -> ConstWitness a
+
 {- [markdown]
 which would allow the Witness value to enter `Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`-functions elsewhere, e.g. through `f x :@@: xs`.
 To prevent this, we need to require `h (ExistentiallyIndexed f x)` to contain at least one `ExistentiallyIndexed f x`.
@@ -480,81 +502,124 @@ In a strict programming language, the above would be enough.
 To show why it is not, I first need to write a function that actually uses the "proof":
 -}
 
-preserving0
-  :: forall h f g xs ys a
-   . (Linear.Control.Functor h, Functor h) -- The normal non-linear Functor is not a superclass of Linear.Control.Functor, so we need to add both.
-  => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
-  -> f a :@@: xs
-  -> h (g a :@@: ys)
-preserving0 f x = f @a Witness x <&> \(ExistentiallyIndexed Witness y) -> unsafeCoerce y
-
-problem =
-  fst $
-    preserving0 @((,) (ExistentiallyIndexed Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
-      (\w l -> (ExistentiallyIndexed w l, error "The consequences of my actions"))
-      VNil
-
--- very specific simple Show instance for the purpose of this example
-instance Show a => Show (ExistentiallyIndexed Vec (LoT1 a)) where
-  show (ExistentiallyIndexed w x) = show (w, x)
-
--- >>> problem
--- (Witness,VNil)
-{- [markdown]
-We have successfully ignored the consequences of our actions and thus obtained an unrestricted `Witness`-value!
-That could be abused to cause all sorts of mayhem in other uses of `preserving0`.
-
-As mentioned before, the problem lies with strictness, or rather laziness in this case.
-The caller of `preserving0` can always choose not to evaluate the produced `ExistentiallyIndexed`, and thus the passed witness can escape.
-It's not enough to call `deepseq` on the produced `h (ExistentiallyIndexed g ys)`, because if we take `h` as `State s` for example, `deepseq` would not ensure `g a :@@: ys` is evaluated to weak-head-normal-form before the tuple in the definition of `State` is created (and the `NFData` instance for `a -> b` has been deprecated for a while anyway).
-Moreover, we don't want to force the entire `h (ExistentiallyIndexed g ys)`-value.
-
-We need a `fmap` that allows evaluating a part of the `a` in `f a` to weak-head-normal-form before producing an `f b` (or the result of a function that produces `b` in cases that embed a function like `Linear.Control.StateT s m`).
-It must be "a part of `a`", because if we implement this for `Linear.Control.StateT s m`, we need to recursively apply the function to `m (a, s)`, and we want to evaluate a part of that `a`, not `m`'s "element" (the tuple `(a, s)`).
-
-We'll accomplish this with a new class called `SeqElement` (name is subject to change):
--}
 -- todo: check linearity of all functions
-class L.Functor f => SeqElement f where
-  mapAndSeq :: Consumable c => (a %1 -> (b, c)) -> f a %1 -> f b
-{- [markdown]
-Let't check that we can indeed define instance for `Linear.Control.StateT s m`, `Identity` and `(,) a` for this.
--}
+-- todo: rename witness
 
-instance SeqElement Identity where
-  mapAndSeq extract (Identity a) = extract a & \(b, c) -> lseq c L.$ Identity b
+data AffineElementMultiplicity = Single | None
 
-instance SeqElement m => SeqElement (Linear.Control.StateT s m) where
-  mapAndSeq extract (Linear.Control.StateT f) = Linear.Control.StateT L.$ mapAndSeq extract' . f
-   where
-    extract' (a, s) = extract a & \(b, c) -> ((b, s), c)
+data AffineMapInput (m :: AffineElementMultiplicity) f a b where
+-- todo: make replicator optional to allow IO as well?
+  SingleElementInput :: Replicator (f ()) %1 -> a %1 -> AffineMapInput 'Single f a b
+  NoElementInput :: Replicator (f b) %1 -> AffineMapInput 'None f a b
 
-instance SeqElement ((,) a) where
-  mapAndSeq extract (a, b) = extract b & \(d, c) -> lseq c (a, d)
-{- [markdown]
-So far so good!
-Let's check that this solved our `problem`.
--}
+data AffineMapOutput m f b where
+  SingleElementOutput :: b %1 -> AffineMapOutput 'Single f b
+  NoElementOutput :: f b %1 -> AffineMapOutput m f b
 
-seqAndMap :: (SeqElement f, Consumable c) => f a %1 -> (a %1 -> (b, c)) -> f b
-seqAndMap = flip mapAndSeq
+class L.Functor f => AffineElement f where
+  affineMap
+    :: (forall m. AffineMapInput m f a b %1 -> AffineMapOutput m f b) %1 -> f a %1 -> f b
+
+instance AffineElement Identity where
+  affineMap f (Identity a) = case f L.$ SingleElementInput (Identity L.<$> dupR ()) a of
+    SingleElementOutput b -> Identity b
+    NoElementOutput ib -> ib
+
+instance Dupable a => AffineElement ((,) a) where
+  affineMap f (a, b) = let !(a1, a2) = dup a in case f L.$ SingleElementInput (dupR (a1, ())) b of
+    SingleElementOutput c -> (a2, c)
+    NoElementOutput ac -> lseq a2 ac
+
+-- todo: dupable eliminates IO
+instance (AffineElement m, Dupable s) => AffineElement (Linear.Control.StateT s m) where
+  affineMap f (Linear.Control.StateT t) =
+    Linear.Control.StateT
+      L.$ \sIn ->
+        let
+          !(sIn1, sIn2) = dup sIn
+        in
+          affineMap
+            ( \case
+                SingleElementInput r (a, sOut) ->
+                  let
+                    !(sOut1, sOut2) = dup sOut
+                    uniqueMapInput =
+                      SingleElementInput
+                        ( L.liftA2
+                            ( \sOut2' ->
+                                Linear.Control.StateT
+                                  . flip lseq
+                                  . affineMap
+                                    ( \case
+                                        SingleElementInput rmu () -> lseq rmu L.$ SingleElementOutput ((), sOut2')
+                                        NoElementInput rmb -> lseq sOut2' L.$ NoElementOutput L.$ extract rmb
+                                    )
+                            )
+                            (dupR sOut2)
+                            r
+                        )
+                        a
+                  in
+                    case f uniqueMapInput of
+                      SingleElementOutput b -> lseq sIn2 L.$ SingleElementOutput (b, sOut1)
+                      NoElementOutput (Linear.Control.StateT t') -> lseq sOut1 L.$ NoElementOutput L.$ t' sIn2
+                NoElementInput rfb ->
+                  (\(NoElementOutput (Linear.Control.StateT t')) -> NoElementOutput L.$ t' sIn2)
+                    L.$ f
+                    L.$ NoElementInput
+                    L.$ L.fmap (Linear.Control.StateT . flip lseq) rfb
+            )
+            (t sIn1)
+
+newtype ExceptT m e a = ExceptT (m (Either e a))
+  deriving (Functor)
+
+instance L.Functor m => L.Functor (ExceptT m e) where
+  fmap f (ExceptT m) = ExceptT L.$ L.fmap (second f) m
+
+instance (Dupable e, AffineElement m) => AffineElement (ExceptT m e) where
+  affineMap f (ExceptT m) =
+    ExceptT
+      L.$ affineMap
+        ( \case
+            SingleElementInput r eith -> case eith of
+              Left e ->
+                (\(NoElementOutput (ExceptT n)) -> NoElementOutput n)
+                  L.$ f
+                  L.$ NoElementInput
+                  L.$ L.liftA2
+                    ( \e' ->
+                        ExceptT
+                          . affineMap
+                            ( \case
+                                SingleElementInput r' () -> lseq r' L.$ SingleElementOutput L.$ Left e'
+                                NoElementInput mEithReplicator -> lseq e' L.$ NoElementOutput L.$ extract mEithReplicator
+                            )
+                    )
+                    (dupR e)
+                    r
+              Right a ->
+                case f L.$ SingleElementInput (ExceptT . L.fmap Right L.<$> r) a of
+                  SingleElementOutput b -> SingleElementOutput L.$ Right b
+                  NoElementOutput (ExceptT mEith) -> NoElementOutput mEith
+            NoElementInput r ->
+              ( \(NoElementOutput (ExceptT n)) ->
+                  NoElementOutput n
+              )
+                L.$ f
+                L.$ NoElementInput
+                L.$ L.fmap ExceptT r
+        )
+        m
 
 preserving
   :: forall h f g xs ys a
-   . (Linear.Control.Functor h, Functor h, SeqElement h)
+   . AffineElement h
   => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
   -> f a :@@: xs
   -> h (g a :@@: ys)
-preserving f x = f @a Witness x `seqAndMap` \(ExistentiallyIndexed Witness y) -> (unsafeCoerce y, ())
+preserving f x = L.fmap (\(ExistentiallyIndexed Witness y) -> unsafeCoerce y) L.$ f @a Witness x
 
-problemSolved =
-  fst $
-    preserving @((,) (ExistentiallyIndexed Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
-      (\w l -> (ExistentiallyIndexed w l, error "The consequences of my actions"))
-      VNil
-
--- >>> problemSolved
--- The consequences of my actions
 {- [markdown]
 Calling a problem "solved" when your function returns an `error` instead of a proper value feels odd, but that's what you get when working with unsafe primitives.
 
@@ -567,17 +632,30 @@ Let's make it a bit easier to use and demonstrate conversion between rank-2 base
 
 expose
   :: forall x h f g xs ys
-   . (Linear.Control.Functor h, Functor h, SeqElement h)
+   . AffineElement h
   => (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> f x :@@: xs -> h (g x :@@: ys)
 expose f = preserving @_ @f @g @xs @ys @x $ \w x -> f (ExistentiallyIndexed w x)
 
 hide
   :: forall h f g xs ys
-   . (Linear.Control.Functor h, Functor h) -- This use of Linear.Control.Functor is actually independent from the one guaranteeing safety in `preserving`. This function uses it to actually move the received Witness into h.
+   . (AffineElement h, Functor h)
   => (forall x. f x :@@: xs -> h (g x :@@: ys))
   -> ExistentiallyIndexed f xs
   %1 -> h (ExistentiallyIndexed g ys)
-hide f (ExistentiallyIndexed @x w x) = Linear.Control.fmap (\(Ur y) -> ExistentiallyIndexed w y) L.$ Ur <$> f @x x
+hide f (ExistentiallyIndexed @x w x) =
+  affineMap
+    ( \case
+        SingleElementInput r (Ur y) -> lseq r L.$ SingleElementOutput L.$ ExistentiallyIndexed w y
+        NoElementInput r -> lseq w L.$ NoElementOutput L.$ extract r
+    )
+    L.$ Ur
+    <$> f @x x
+
+instance Consumable (Witness x) where
+  consume Witness = ()
+
+instance Consumable (ExistentiallyIndexed f xs) where
+  consume (ExistentiallyIndexed w _) = consume w
 
 {- [markdown]
 The function `expose` exposes the existential type hidden in `ExistentiallyIndexed`, while `hide` hides a type in `ExistentiallyIndexed`.
@@ -594,11 +672,11 @@ instance Functor (Vec n) where
 
 -- Like `LensLike`, but it preserves the hidden index in the foci.
 type PreservingLensLike h s t f xs g ys =
-  (Linear.Control.Functor h, Functor h)
+  AffineElement h
   => Lens.Over (FUN One) h s t (ExistentiallyIndexed f xs) (ExistentiallyIndexed g ys) -- = (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> s -> h t
 
 partsOf
-  :: (Linear.Control.Functor f, Functor f, SeqElement f)
+  :: (AffineElement f, Functor f, AffineElement f)
   => Lens.Traversing (->) f s t a b -> PreservingLensLike f s t Vec (LoT1 a) Vec (LoT1 b)
 partsOf o f s =
   lazyVecFromList (ins b) -- Surprise! We actually need `lazyVecFromList2` to make `partsOf` lazy.
@@ -612,8 +690,8 @@ partsOf o f s =
 
 pTraverseOf
   :: forall xs ys h f g s t
-   . (Applicative h, Linear.Control.Functor h, SeqElement h)
-  => (forall m. (Applicative m, Linear.Control.Functor m, SeqElement m) => PreservingLensLike m s t f xs g ys)
+   . (Applicative h, AffineElement h, AffineElement h)
+  => (forall m. (Applicative m, AffineElement m, AffineElement m) => PreservingLensLike m s t f xs g ys)
   -> (forall x. f x :@@: xs -> h (g x :@@: ys))
   -> s
   -> h t
@@ -625,7 +703,7 @@ demo1 =
   runIdentity $
     pTraverseOf
       (partsOf (Lens.traversed . Lens._Right))
-      (\chars -> Identity $ fmap (const $ vecToList chars) chars)
+      (\chars -> Identity $ fmap (NL.const $ vecToList chars) chars)
       [Left True, Right 'h', Left False, Right 'i']
 
 -- >>> demo1
@@ -656,11 +734,11 @@ type instance Lens.IxValue (Vec n a) = a
 instance Lens.Ixed (Vec n a) where
   ix 0 f (VCons a as) = flip VCons as <$> f a
   ix i f (VCons a as) = VCons a <$> Lens.ix (pred i) f as
-  ix _ _ VNil = error "a proper `ix` for vectors would use some integral type with an upper bound"
+  ix _ _ VNil = error "a proper `ix` for vectors would use some integral type with a type-level upper bound"
 
 hidden
   :: forall f s t xs ys a b
-   . (Linear.Control.Functor f, Functor f)
+   . (AffineElement f, Functor f)
   => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
   -> (a -> f b)
   -> ExistentiallyIndexed s xs
@@ -676,6 +754,7 @@ demo2 =
       [Left True, Right 'h', Left False, Right 'i']
 
 main = print demo2
+
 -- prints [Left True,Right 'h',Left False,Right 'I']
 -- notice how the "i" at the end is now capitalized
 {- [markdown]
@@ -692,8 +771,9 @@ type PreservingLensLike' h s f xs = PreservingLensLike h s s f xs f xs
 
 type PreservingGetter r s f xs = PreservingLensLike' ((,) r) s f xs
 
-pView :: PreservingGetter (Some f xs) s f xs -> s -> Some f xs
+pView :: Dupable (Some f xs) => PreservingGetter (Some f xs) s f xs -> s -> Some f xs
 pView o s = NL.fst $ o (hide (\ @x x -> (Some @x x, x))) s
+
 {- [markdown]
 ## Wrapping up
 

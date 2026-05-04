@@ -1,7 +1,10 @@
 {
     "haskell.formattingProvider": "fourmolu",
     "cSpell.words": [
+        "fmap",
         "forall",
+        "gxys",
+        "lseq",
         "Succ",
         "unur"
     ],
