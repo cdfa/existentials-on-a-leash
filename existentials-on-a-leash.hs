@@ -49,6 +49,8 @@ We'll work out the second option, but first we need to enable some language exte
 -}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures -Wno-unused-top-binds -Wno-orphans #-}
 
+{- HLINT ignore "Use first" -}
+
 {- cabal:
 ghc-options: -Wall
 default-language: GHC2024
@@ -68,13 +70,16 @@ index-state: 2026-03-18T08:38:52Z
 semaphore: True
 -}
 
-import Control.Functor.Linear qualified as Linear.Control
+import Control.Functor.Linear hiding (Applicative (..), Functor (..), (<$>))
+import Control.Functor.Linear qualified as Control
 import Control.Lens qualified as Lens
 import Control.Lens.Internal.Bazaar qualified as Lens
 import Control.Lens.Internal.Context qualified as Lens
+import Control.Monad.Except
 import Control.Monad.State.Lazy qualified as NL
 import Data.Bifunctor.Linear
 import Data.Char
+import Data.Functor qualified as NL
 import Data.Functor.Identity
 import Data.Functor.Linear qualified as L
 import Data.Kind
@@ -82,7 +87,6 @@ import Data.List as NL
 import Data.Maybe
 import Data.PolyKinded hiding (Nat)
 import Data.Profunctor.Rep qualified as Lens
-import Data.Replicator.Linear (Replicator, extract)
 import Data.Tuple qualified as NL
 import Data.Type.Equality
 import Data.Unrestricted.Linear
@@ -131,7 +135,7 @@ The CPS-variant would not help either for a similar reason: the continuation can
 
 As the author of the existential types proposal states for the `filter` function, it's not possible to define a lazy version in GHC's current type system.
 
-\*So we have to work around it.*
+ *So we have to work around it.*
 
 ## Putting existentials on a leash
 
@@ -420,6 +424,7 @@ This demo is a bit contrived because I wanted to use the `n ~ Succ m` explicitly
 While that "inconvenience" is by design, there are also still a lot of unintentional difficulties with working with linear types:
   * There is no multiplicity inference yet. This means that most existing Haskell code is unusable, even if the implementation of a function is actually linear.
   * The error messages don't say where a value is not used linearly, only which variable.
+  * Even if a function only captures `Consumable` or `Dupable` values in it's closure, it's not `Consumable` or `Dupable`.
   * Linear pattern synonyms are not supported yet.
   * All the other limitations mentioned in the [docs](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/linear_types.html#limitations).
 
@@ -431,14 +436,14 @@ Luckily, we can define a `lazyVecFromList` that hides all of the linear-types co
 lazyVecFromList :: [a] -> SomeVec a
 lazyVecFromList xs =
   unpack (SomeVec L.. lazyVecFromList1 (fmap Ur xs))
-       & \(SomeVec vec) -> SomeVec $ L.fmap unur vec
+    & \(SomeVec vec) -> SomeVec $ L.fmap unur vec
 
 {- [markdown]
 
 todo: title
 ## Invisible type preservation with linear control functors
 
-*I discovered the trick above almost 2 years ago.*
+ *I discovered the trick above almost 2 years ago.*
 
 I put it on GitHub, but never mentioned it because I had not yet succeeded in my actual goal: to make a safe version of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
 The hard thing about this is that to enable it to change the types of the foci of the argument `Traversable`, we need to ensure that the lists in the focus of `partsOf` are of the same length, while at the same time, this length cannot be known by the caller.
@@ -505,151 +510,241 @@ To show why it is not, I first need to write a function that actually uses the "
 -- todo: check linearity of all functions
 -- todo: rename witness
 
-data AffineElementMultiplicity = Single | None
-
-data AffineMapInput (m :: AffineElementMultiplicity) f a b where
--- todo: make replicator optional to allow IO as well?
-  SingleElementInput :: Replicator (f ()) %1 -> a %1 -> AffineMapInput 'Single f a b
-  NoElementInput :: Replicator (f b) %1 -> AffineMapInput 'None f a b
-
-data AffineMapOutput m f b where
-  SingleElementOutput :: b %1 -> AffineMapOutput 'Single f b
-  NoElementOutput :: f b %1 -> AffineMapOutput m f b
-
-class L.Functor f => AffineElement f where
-  affineMap
-    :: (forall m. AffineMapInput m f a b %1 -> AffineMapOutput m f b) %1 -> f a %1 -> f b
-
-instance AffineElement Identity where
-  affineMap f (Identity a) = case f L.$ SingleElementInput (Identity L.<$> dupR ()) a of
-    SingleElementOutput b -> Identity b
-    NoElementOutput ib -> ib
-
-instance Dupable a => AffineElement ((,) a) where
-  affineMap f (a, b) = let !(a1, a2) = dup a in case f L.$ SingleElementInput (dupR (a1, ())) b of
-    SingleElementOutput c -> (a2, c)
-    NoElementOutput ac -> lseq a2 ac
-
--- todo: dupable eliminates IO
-instance (AffineElement m, Dupable s) => AffineElement (Linear.Control.StateT s m) where
-  affineMap f (Linear.Control.StateT t) =
-    Linear.Control.StateT
-      L.$ \sIn ->
-        let
-          !(sIn1, sIn2) = dup sIn
-        in
-          affineMap
-            ( \case
-                SingleElementInput r (a, sOut) ->
-                  let
-                    !(sOut1, sOut2) = dup sOut
-                    uniqueMapInput =
-                      SingleElementInput
-                        ( L.liftA2
-                            ( \sOut2' ->
-                                Linear.Control.StateT
-                                  . flip lseq
-                                  . affineMap
-                                    ( \case
-                                        SingleElementInput rmu () -> lseq rmu L.$ SingleElementOutput ((), sOut2')
-                                        NoElementInput rmb -> lseq sOut2' L.$ NoElementOutput L.$ extract rmb
-                                    )
-                            )
-                            (dupR sOut2)
-                            r
-                        )
-                        a
-                  in
-                    case f uniqueMapInput of
-                      SingleElementOutput b -> lseq sIn2 L.$ SingleElementOutput (b, sOut1)
-                      NoElementOutput (Linear.Control.StateT t') -> lseq sOut1 L.$ NoElementOutput L.$ t' sIn2
-                NoElementInput rfb ->
-                  (\(NoElementOutput (Linear.Control.StateT t')) -> NoElementOutput L.$ t' sIn2)
-                    L.$ f
-                    L.$ NoElementInput
-                    L.$ L.fmap (Linear.Control.StateT . flip lseq) rfb
-            )
-            (t sIn1)
-
-newtype ExceptT m e a = ExceptT (m (Either e a))
-  deriving (Functor)
-
-instance L.Functor m => L.Functor (ExceptT m e) where
-  fmap f (ExceptT m) = ExceptT L.$ L.fmap (second f) m
-
-instance (Dupable e, AffineElement m) => AffineElement (ExceptT m e) where
-  affineMap f (ExceptT m) =
-    ExceptT
-      L.$ affineMap
-        ( \case
-            SingleElementInput r eith -> case eith of
-              Left e ->
-                (\(NoElementOutput (ExceptT n)) -> NoElementOutput n)
-                  L.$ f
-                  L.$ NoElementInput
-                  L.$ L.liftA2
-                    ( \e' ->
-                        ExceptT
-                          . affineMap
-                            ( \case
-                                SingleElementInput r' () -> lseq r' L.$ SingleElementOutput L.$ Left e'
-                                NoElementInput mEithReplicator -> lseq e' L.$ NoElementOutput L.$ extract mEithReplicator
-                            )
-                    )
-                    (dupR e)
-                    r
-              Right a ->
-                case f L.$ SingleElementInput (ExceptT . L.fmap Right L.<$> r) a of
-                  SingleElementOutput b -> SingleElementOutput L.$ Right b
-                  NoElementOutput (ExceptT mEith) -> NoElementOutput mEith
-            NoElementInput r ->
-              ( \(NoElementOutput (ExceptT n)) ->
-                  NoElementOutput n
-              )
-                L.$ f
-                L.$ NoElementInput
-                L.$ L.fmap ExceptT r
-        )
-        m
-
-preserving
+preserving0
   :: forall h f g xs ys a
-   . AffineElement h
+   . (Control.Functor h, Functor h) -- The normal non-linear Functor is not a superclass of Control.Functor, so we need to add both.
   => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
   -> f a :@@: xs
   -> h (g a :@@: ys)
-preserving f x = L.fmap (\(ExistentiallyIndexed Witness y) -> unsafeCoerce y) L.$ f @a Witness x
+preserving0 f x = f @a Witness x NL.<&> \(ExistentiallyIndexed Witness y) -> unsafeCoerce y
+
+problem =
+  NL.fst $
+    preserving0 @((,) (ExistentiallyIndexed Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
+      (\w l -> (ExistentiallyIndexed w l, error "The consequences of my actions"))
+      VNil
+
+-- very specific simple Show instance for the purpose of this example
+instance Show a => Show (ExistentiallyIndexed Vec (LoT1 a)) where
+  show (ExistentiallyIndexed w x) = show (w, x)
+
+-- >>> problem
+-- (Witness,VNil)
+{- [markdown]
+We have successfully ignored the consequences of our actions and thus obtained an unrestricted `Witness`-value!
+That could be abused to cause all sorts of mayhem in other uses of `preserving0`.
+
+As mentioned before, the problem lies with strictness, or rather laziness in this case.
+The caller of `preserving0` can always choose not to evaluate the `ExistentiallyIndexed` in the right side of the tuple, and thus the passed witness can escape.
+It's not enough to call `deepseq` on the produced `h (ExistentiallyIndexed g ys)`, because if we take `h` as `State s` for example, `deepseq` would not ensure `g a :@@: ys` is evaluated to weak-head-normal-form before the tuple in the definition of `State` is created (and the `NFData` instance for `a -> b` has been deprecated for a while anyway).
+Moreover, we don't want to force the entire `h (ExistentiallyIndexed g ys)`-value.
+
+We need a `fmap` that allows evaluating a part of the `a` in `f a` to weak-head-normal-form before producing an `f b` (or the result of a function that produces `b` in cases that embed a function like `StateT s m`).
+It must be "a part of `a`", because if we implement this for `StateT s m`, we need to recursively apply the function to `m (a, s)`, and we want to evaluate a part of that `a`, not `m`'s "element" (the tuple `(a, s)`).
+
+We'll accomplish this with a new class called `SeqElement` (name is subject to change):
+-}
+class L.Functor f => SeqElement f where
+  mapAndSeq :: Consumable c => (a %1 -> (b, Maybe c)) -> f a %1 -> f b
+
+{- [markdown]
+Let't check that we can define instances for `SeqElement` for some common functors.
+-}
+
+instance SeqElement Identity where
+  mapAndSeq extract (Identity a) = extract a & \(b, c) -> lseq c L.$ Identity b
+
+instance SeqElement m => SeqElement (StateT s m) where
+  mapAndSeq extract (StateT f) = StateT L.$ mapAndSeq extract' . f
+   where
+    extract' (a, s) = extract a & \(b, c) -> ((b, s), c)
+
+instance SeqElement m => SeqElement (ExceptT e m) where
+  mapAndSeq extract (ExceptT m) = ExceptT L.$ flip mapAndSeq m L.$ \case
+    Left e -> (Left e, Nothing)
+    Right a -> first Right L.$ extract a
+
+instance SeqElement ((,) a) where
+  mapAndSeq extract (a, b) = extract b & \(d, c) -> lseq c (a, d)
+
+{- [markdown]
+So far so good!
+Let's check that this solves our `problem`.
+-}
+
+seqAndMap :: (SeqElement f, Consumable c) => f a %1 -> (a %1 -> (b, Maybe c)) -> f b
+seqAndMap = flip mapAndSeq
+
+preserving1
+  :: forall h f g xs ys a
+   . (Control.Functor h, SeqElement h)
+  => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
+  -> f a :@@: xs
+  -> h (g a :@@: ys)
+preserving1 f x = f @a Witness x `seqAndMap` \(ExistentiallyIndexed Witness y) -> (unsafeCoerce y, Just ())
+
+problemSolved =
+  NL.fst $
+    preserving1 @((,) (ExistentiallyIndexed Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
+      (\w l -> (ExistentiallyIndexed w l, error "The consequences of my actions"))
+      VNil
+
+-- >>> problemSolved
+-- The consequences of my actions
 
 {- [markdown]
 Calling a problem "solved" when your function returns an `error` instead of a proper value feels odd, but that's what you get when working with unsafe primitives.
 
-We've been "patching holes" a lot, but I think we've finally neutralized the dangers of the `unsafeCoerce` in `preserving`!
-Still, I'd encourage you to think if there's something I've missed!
+With this, I believe we've finally neutralized the dangers of the `unsafeCoerce` in `preserving`!
+I wasn't quite satisfied though.
+Our current definition requires that `h` is a linear control functor, but that's actually quite a severe limitation.
+For example, `Either e` and `ExceptT m e` are excluded.
+Also conceptually, our requirement of `h` that it contains at least one element `a` is conceptually more strict than necessary.
+For example, it's fine if `h` does not contain `a` when `h ()` is `Dupable`, because that would prevent `h` from containing a `Witness`.
+But `StateT s m ()` is not `Dupable` despite not containing a `Witness`, so that rule is also overly restrictive.
 
-Due to the type families, `preserving` is hopelessly ambiguous (as in: almost none of the type variables can be inferred from its usage).
-Let's make it a bit easier to use and demonstrate conversion between rank-2 based existentials:
+To discover a more suitable general rule, let's first look at conversions between `ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)`-functions and rank-2 based existentials:
 -}
+
+expose0
+  :: forall x h f g xs ys
+   . (Control.Functor h, SeqElement h)
+  => (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+expose0 f = preserving1 @_ @f @g @xs @ys @x $ \w x -> f (ExistentiallyIndexed w x)
+
+hide0
+  :: forall h f g xs ys
+   . (Control.Functor h, Functor h)
+  => (forall x. f x :@@: xs -> h (g x :@@: ys))
+  -> ExistentiallyIndexed f xs
+  %1 -> h (ExistentiallyIndexed g ys)
+hide0 f (ExistentiallyIndexed @x w x) = Control.fmap (\(Ur y) -> ExistentiallyIndexed w y) L.$ Ur <$> f @x x
+{- [markdown]
+The function `expose0` exposes the existential type hidden in `ExistentiallyIndexed`, while `hide0` hides a type in `ExistentiallyIndexed`.
+Note that `hide0` actually uses the `Control.Functor h` constraint to move the linear `Witness` w into `h`.
+
+The insight that leads to a looser requirement for safe `h`'s is that there is a another way to move a linear value into a functor: `L.liftA2 (\w' (Ur y) -> ExistentiallyIndexed w' y) (Control.pure w) hy`.
+That uses `Control.pure` from `Control.Applicative`, which is of course a subclass of `Control.Functor`, so it does not help yet.
+`Control.pure` can not be implemented for something like `ConstWitness`, so requiring an implementation for `h` guards against some bad cases, but not all yet: 
+
+ also guards against these cases that let the `Witness` escape, even without the `Control.Functor` superclass.
+Because of that, we can split `Control.pure` out into a separate class that does not extend `Control.Functor`.
+This has been done for the non-linear pure as well, and it's called [`Pointed`](https://hackage.haskell.org/package/pointed-5.0.5/docs/Data-Pointed.html).
+We'll define our own linear version:
+-}
+
+class L.Functor f => Pointed f where
+  point :: a %1 -> f a
+
+{- [markdown]
+
+<details>
+<summary>Instances</summary>
+
+-}
+
+instance Pointed Identity where
+  point = Identity
+
+instance Pointed m => Pointed (StateT s m) where
+  point a = StateT L.$ \s -> point (a, s)
+
+instance Pointed m => Pointed (ExceptT e m) where
+  point a = ExceptT L.$ point L.$ Right a
+{- [markdown]
+</details>
+
+
+-}
+
+
+class AffineFunctor f where
+  aMap :: Consumable a => (a %1 -> b) -> f a %1 -> f b
+
+instance AffineFunctor (Either e) where
+  aMap _ (Left e) = Left e
+  aMap f (Right a) = Right L.$ f a
+
+instance L.Functor m => AffineFunctor (ExceptT e m) where
+  aMap f (ExceptT m) = ExceptT L.$ L.fmap (L.fmap f) m
+
+instance L.Functor m => AffineFunctor (StateT s m) where
+  aMap f (StateT t) = StateT L.$ L.fmap (first f) . t
+
+class AffineFunctor f => AffineApplicative f where
+  aPure :: a %1 -> f a
+  aLiftA2
+    :: (Consumable a, Consumable b)
+    => (a %1 -> b %1 -> c) -> f a %1 -> f b %1 -> f c
+
+instance Consumable e => AffineApplicative (Either e) where
+  aPure = Right
+  aLiftA2 _ (Left e) r = lseq r L.$ Left e
+  aLiftA2 _ l (Left e) = lseq l L.$ Left e
+  aLiftA2 f (Right a) (Right b) = Right L.$ f a b
+
+instance (AffineApplicative m, L.Functor m, Consumable e) => AffineApplicative (ExceptT e m) where
+  aPure = ExceptT . aPure . Right
+  aLiftA2 f (ExceptT m) (ExceptT n) = ExceptT L.$ aLiftA2 (aLiftA2 f) m n
+
+instance Control.Monad m => AffineApplicative (StateT s m) where
+  aPure a = StateT L.$ \s -> Control.pure (a, s)
+  aLiftA2 f (StateT ta) tb = StateT L.$ \s0 -> do
+    ta s0 >>= \(a, s1) ->
+      Control.fmap (\(b, s2) -> (f a b, s2)) L.$ runStateT tb s1
+
+data Dict :: Constraint -> Type where
+  Dict :: a => Dict a
+
+class SeqElement f => Capturing f where
+  applicativeOrControl :: Either (Dict (AffineApplicative f, Pointed f)) (Dict (Control.Functor f))
+
+instance Capturing Identity where
+  applicativeOrControl = Right Dict -- We pick the linear control functor option because it's more efficient than AffineApplicative+Pointed
+
+instance (Control.Functor m, SeqElement m) => Capturing (StateT s m) where
+  applicativeOrControl = Right Dict -- the `AffineApplicative` for `StateT s m` requires `Control.Monad m`, so even if `applicativeOrControl @m` is `Left`, using `Right` for `StateT s m` leads to the least stringent constraints.
+
+instance Capturing ((,) a) where
+  applicativeOrControl = Right Dict
+
+instance
+  ( AffineApplicative m
+  , Consumable e
+  , Pointed m
+  , SeqElement m
+  )
+  => Capturing (ExceptT e m)
+  where
+  applicativeOrControl = Left Dict
+
+preserving
+  :: forall h f g xs ys a
+   . Capturing h
+  => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
+  -> f a :@@: xs
+  -> h (g a :@@: ys)
+preserving f x = f @a Witness x `seqAndMap` \(ExistentiallyIndexed Witness y) -> (unsafeCoerce y, Just ())
 
 expose
   :: forall x h f g xs ys
-   . AffineElement h
+   . (Capturing h, Functor h)
   => (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> f x :@@: xs -> h (g x :@@: ys)
 expose f = preserving @_ @f @g @xs @ys @x $ \w x -> f (ExistentiallyIndexed w x)
 
 hide
   :: forall h f g xs ys
-   . (AffineElement h, Functor h)
+   . (Capturing h, Functor h)
   => (forall x. f x :@@: xs -> h (g x :@@: ys))
   -> ExistentiallyIndexed f xs
   %1 -> h (ExistentiallyIndexed g ys)
 hide f (ExistentiallyIndexed @x w x) =
-  affineMap
-    ( \case
-        SingleElementInput r (Ur y) -> lseq r L.$ SingleElementOutput L.$ ExistentiallyIndexed w y
-        NoElementInput r -> lseq w L.$ NoElementOutput L.$ extract r
-    )
-    L.$ Ur
-    <$> f @x x
+  let
+    hy = Ur <$> f @x x
+  in
+    case applicativeOrControl @h of
+      Left Dict -> aLiftA2 (\w' (Ur y) -> ExistentiallyIndexed w' y) (point w) hy
+      Right Dict -> Control.fmap (\(Ur y) -> ExistentiallyIndexed w y) hy
 
 instance Consumable (Witness x) where
   consume Witness = ()
@@ -672,11 +767,11 @@ instance Functor (Vec n) where
 
 -- Like `LensLike`, but it preserves the hidden index in the foci.
 type PreservingLensLike h s t f xs g ys =
-  AffineElement h
+  Capturing h
   => Lens.Over (FUN One) h s t (ExistentiallyIndexed f xs) (ExistentiallyIndexed g ys) -- = (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> s -> h t
 
 partsOf
-  :: (AffineElement f, Functor f, AffineElement f)
+  :: (Capturing f, Functor f, Capturing f)
   => Lens.Traversing (->) f s t a b -> PreservingLensLike f s t Vec (LoT1 a) Vec (LoT1 b)
 partsOf o f s =
   lazyVecFromList (ins b) -- Surprise! We actually need `lazyVecFromList2` to make `partsOf` lazy.
@@ -690,8 +785,8 @@ partsOf o f s =
 
 pTraverseOf
   :: forall xs ys h f g s t
-   . (Applicative h, AffineElement h, AffineElement h)
-  => (forall m. (Applicative m, AffineElement m, AffineElement m) => PreservingLensLike m s t f xs g ys)
+   . (Applicative h, Capturing h)
+  => (forall m. (Applicative m, Capturing m, Capturing m) => PreservingLensLike m s t f xs g ys)
   -> (forall x. f x :@@: xs -> h (g x :@@: ys))
   -> s
   -> h t
@@ -738,7 +833,7 @@ instance Lens.Ixed (Vec n a) where
 
 hidden
   :: forall f s t xs ys a b
-   . (AffineElement f, Functor f)
+   . (Capturing f, Functor f)
   => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
   -> (a -> f b)
   -> ExistentiallyIndexed s xs
