@@ -5,15 +5,20 @@
 {- [markdown]
 # Existentials on a leash
 
-In this article, I will share 2 new workarounds for (the lack of) existentially quantified type variables in Haskell.
-The first workaround allows them to appear "naked" (without CPS-style/GADT wrapping) in a type signature, while the second allows for defining optics over types containing existentially quantified variables (though without having them appear naked in the type signature).
+In this article, I will share a new workaround for the lack of existential quantification in Haskell.
+Specifically, I will show the implementation of an `Exists` quantifier that allows existential type variables to appear "naked" (without CPS-style/GADT wrapping) in types.
+The quantifier is implemented as a type synonym for functions that linearly consume a proof-token that ensures proper treatment of existentially-typed values.
 
-Both these techniques rely on witness-values passed linearly through some function.
-I believe the linear use of these witnesses makes the use of unsafe functions in these techniques safe, though I have not proven anything formally.
+Additionally, I share an independent technique that ensures functions instantiate existential types in their result with the same type as it's input is instantiated, i.e. they preserve the instantiation of hidden type variables.
+This technique also relies on linear types, but not the existential quantifier mentioned before.
+I will demonstrate this technique by implementing a safe variant of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
+
+Both techniques coerce types using `unsafeCoerce`.
+I explain why I believe these coercions are safe, but I haven't proven anything formally.
 Please try to break this stuff if you see some hole I have missed.
 
 While I will briefly explain what existential types and linear types are, this article is not meant as a general introduction to these language features.
-Familiarity with GADTs, linear types and optics (for the sections pertaining to them) is recommended.
+Familiarity with GADTs, linear types and optics (for the sections pertaining to those) is recommended.
 
 That being said, I made it as easy as I can for the reader to tinker with the code and interactively learn about these concepts by providing a [GitHub Codespace](https://codespaces.new/cdfa/existentials-on-a-leash?quickstart=1) prebuild (hint: use "Preview embedded markdown" to see the .hs file with its markdown version to the side).
 Clicking that link will allow you to tinker with the code with the support of the Haskell Language Server from a Visual Studio Code instance running in your browser (or from a container on your computer).
@@ -100,6 +105,9 @@ import Prelude as NL (Applicative (..), Functor (..), const, ($), (<$>))
 (.) :: forall {rep} b (c :: TYPE rep) a m n. (b %m -> c) %n -> (a %m -> b) %m -> a %m -> c
 (.) f g x = f (g x)
 infixr 9 .
+
+(>=>) :: Monad m => (a %1 -> m b) %1 -> (b %1 -> m c) %1 -> a %1 -> m c
+f >=> g = \x -> f x >>= g
 
 {- [markdown]
 </details>
@@ -196,7 +204,7 @@ pack r (Fresh (Refl :: a :~: b)) = r
 
 {- [markdown]
 The `%1` in `type Exists a b = Fresh a %1 -> b` demands that the function is linear.
-This means that the compiler will verify that such a function will evaluate the argument exactly once if the result of the function is evaluated to normal form.
+This means that the compiler will verify that such a function will consume the argument exactly once if the result of the function is consumed completely.
 These annotations can also be used in the types for GADT constructors (like `VCons`).
 In that case, the values in those fields must be used linearly when you pattern match on that constructor in a linear function.
 
@@ -450,49 +458,105 @@ The hard thing about this is that to enable it to change the types of the foci o
 Because I wanted the optic to be compatible with the existing `lens` ecosystem, a rank-2-type or GADT-wrapper wouldn't work.
 I thought I could use the linear-existentiality-witness-techinique , but when I tried it in `partsOf :: Functor f => Traversing (->) f s t a b -> Fresh n %1 -> LensLike f s t (Vec n a) (Vec n b)`, the fact that the resulting optic must be used linearly, makes it just as incompatible with `lens` as the rank-2-type version.
 
-To be clear, if you unfold the `LensLike f s t (Vec n a) (Vec n b)` to `(forall n. Vec n a -> f (Vec n b)) -> s -> f t` (i.e. use a rank-2-type), you can implement `partsOf` just fine, but this optic can't be used in functions like `traverseOf` or pre-composed with other optics with `.`.
+To be clear, if you unfold the `LensLike f s t (Vec n a) (Vec n b)` to `(forall n. Vec n a -> f (Vec n b)) -> s -> f t` (i.e. use a rank-2-type), you can implement `partsOf` just fine, but this optic can't be used in functions like `traverseOf` or pre-composed with other optics with `.` in GHC, because the `forall n` messes with type inference.
 For a long time, I banged my head against the wall trying to think of a way to make a type-changing `partsOf` that would be compatible with the rest of `lens`, and so the project stayed on my list of things to get back to at some point.
 It's somewhat regrettable that I didn't just publish the first part of this article anyway, but on the other hand I found quite a few serious mistakes when I came back to it, so I'm also happy I caught those before publishing.
 
 I now think making a safe type-changing `partsOf` that is compatible with all the functions from `lens` is impossible, but I did find a way to solve the `.`-pre-composition issue, again using linear functions.
 The rest of this section is dedicated to this technique.
 
-The first idea to make this work is that instead of having an existential type `n` for the length of the vector exposed in the type signature of `partsOf`, we hide it using a type called `ExistentiallyIndexed`, so the focus type of the optic becomes something like `ExistentiallyIndexed Vec a`.
-The second idea is that a function that takes a value `Witness x`, with `x` universally quantified and no other sources of any `Witness` in scope, and which must produce some `Witness y` value, with `y` existentially quantified, can only produce the original `Witness x` value. Thus we can infer `y ~ x`.
-I don't have a formal proof of this either, but hopefully it will become clear when I show the implementation.
+First, we have to wrap the focus in a type like `data Some f = forall x. Some (f x)`.
+This relieves us from having to quantify `n` existentially in optics like `(forall n. Vec n a -> f (Vec n b)) -> s -> f t` thus making it into a normal `lens` optic.
+Then, if a function `fun` producing a `Some`-value, can only do so by returning a `Some`-value that it received as an argument, we can infer that the `x` inside the produced value must be the same as the one the function was applied to.
+Written out in code, we would have `hide :: (Some f -> Some g) -> f x -> g x` defined as `fx = fun (Some fx) & \(Some gy) -> unsafeCoerce gy`, with some constraints on `(Some f -> Some g)` to ensure it has to return the value given as an argument.
 
-Let's start with a definition for `ExistentiallyIndexed`.
-We don't want it to be specific to vectors, or even types with kind `k -> Type -> Type`.
-We will use the kind-heterogeneous type-level lists from `kind-apply`, named [`LoT`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t:LoT) and the operator [`:@@:`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t::-64--64-:) which applies a type level list to a type constructor.
-This permits the following definition of `ExistentiallyIndexed`:
+Obviously the `Some` constructor needs to be hidden, but we also need to prevent `Some`-values from being reused or swapped with `Some`-value with a different origin.
+Making `fun` linear achieves this, but also reduces the space of possible functions to the identity function.
+
+Since it's not very interesting to apply optics to the identity function, there should at least be a function `mapSome :: (forall x. f x -> g x) -> Some f %1 -> Some g`.
+That still only allows `Setter` optics though.
+For most optics we need something like `traverseSome :: Functor h => (forall x. f x -> h (g x)) -> Some f %1 -> h (Some g)` (which we will call `expose` from now on).
+This also requires adapting `hide`, changing its type to `(Some f %1 -> h (Some g)) -> f x -> h (g x)`
+However, this is problematic, because if `h` is chosen to be something like `Const (Some f)`, a `Some`-value can escape and be used non-linearly.
+
+We could apply our previous trick and require that `h ()` is `Dupable`, but that would forbid using `StateT` and other functors which contain a function.
+We could also require that `h` is a linear control functor, i.e. it admits a function `fmap :: (a %1 -> b) %1 -> h a %1 -> h b`.
+If you don't know about linear control functors and the difference with linear data functors, I recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/).
+What's important here is that linear control functors always contain exactly one element `a` (because the `fmap` is linear in `(a %1 -> b)`).
+Because of this, we can be sure that a `h (g x)` produced by `hide` does not contain any `Some`-values (if Haskell were strict, but we'll get to that).
+But this is also very restrictive, because it forbids functors like `Either e`, because `Left` does not contain an `a`.
+
+I think the solution that will fit most use cases is to require that `h` is either a linear control functor, or an instance of a affine version of [`Alt`](https://hackage-content.haskell.org/package/semigroupoids-6.0.2/docs/Data-Functor-Alt.html):
+
+-}
+
+class AffineAlt f where
+  (<!>) :: Consumable a => f a %1 -> f a %1 -> f a
+{- [markdown]
+This definition of `Alt` is "affine" because it will consume all linear arguments at most once, instead of exactly once.
+Functors that store any non-`Consumable` data can not be an instance of `AffineAlt` due to the "left distribution" and "left catch" laws (instances of `Alt` must satisfy at least one of the two):
+\* left distribution regarding `<*>`: `(a <!> b) <*> c = (a <*> c) <!> (b <*> c)`
+\* left catch: `pure a <!> b = pure a`
+The reason that these laws exclude functors with non-`Consumable` data is simplest for the left catch law: `<!>` must be able to consume/discard any `b`.
+Instances that satisfy the left distribution law must do the same, because any data from `c` that is not consumed/discarded is duplicated on the right side of the `=`-sign.
+This way, functors like `Const (Some f)` and `Either (Some f)` or forbidden while `Either e` with some `Consumable` `e` are still allowed.
+
+There are 2 small things to get out of the way before we go to the implementation of `hide` and `expose`:
+ 1. We don't want `Some` to work only for types of kind `k -> Type`.
+    We will use the kind-heterogeneous type-level lists from `kind-apply`, named [`LoT`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t:LoT) (for List of Types) and the operator [`:@@:`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t::-64--64-:) which applies an `LoT` to a type constructor.
+ 2. In the end, we will need both linear and non-linear versions of `Some`, so we will make it parametric in its multiplicity.
 -}
 
 data Witness x = Witness -- consider the constructor hidden
   deriving (Show)
 
-data ExistentiallyIndexed f xs where
-  ExistentiallyIndexed :: Witness y %1 -> f y :@@: xs -> ExistentiallyIndexed f xs -- Note the linear arrow for `Witness x`
-  {- [markdown]
-  Now we can make the functions meant in the second idea concrete. An example would be a function with type `forall x y. Witness x -> Exists y (Witness y)`.
-  Since there are no other sources of `Witness` in scope, the only way to obtain a `Witness` value is from the argument of the function.
-  Hence we can derive `x ~ y`.
+data RestrictingSome f xs where
+  RestrictingSome :: Witness y %1 -> f y :@@: xs -> RestrictingSome f xs -- Note the linear arrow for `Witness x`
+{- [markdown]
 
-  Now let's extend this "proof" slightly by allowing the function to take and produce additional values, e.g. `forall x f g xs ys. Witness x -> f x :@@: xs -> ExistentiallyIndexed g ys`.
-  This adds a potential source of `Witness` values, since `f` is universally quantified.
-  To make it impossible for Witness values to be passed to the function through the additional argument, we must make it impossible for the given value to appear in the result anywhere else than in the first field of `ExistentiallyIndexed`.
-  This is relatively easy to achieve by making the arrow that takes `Witness x` linear, i.e., `forall x f g xs ys. Witness x %1 -> f x :@@: xs -> ExistentiallyIndexed g ys`.
+Since there are no other sources of `Witness` in scope, the only way to obtain a `Witness` value is from the argument of the function.
+Hence we can derive `x ~ y`.
 
-  This only permits `Setter` optics though, which is a bit disappointing.
-  We need to extend the "proof" further to allow functions that produce a functorial context of `ExistentiallyIndexed`, like `forall x f g h xs ys. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`.
-  This is tricky because `h` is also universally quantified and could be chosen to be something like
-  -}
+Now we can make the functions meant in the second idea concrete.
+An example would be a function with type `forall x f g xs ys. Witness x -> f x :@@: xs -> RestrictingSome g ys`.
+To be able to infer `x ~ y`, we can't just hand the `RestrictingSome g ys` with the `Witness` inside back to the caller.
+We will wrap it in a function `preserving0`:
+-}
+
+preserving00
+  :: forall f g xs ys a
+   . (forall x. Witness x -> f x :@@: xs -> RestrictingSome g ys)
+  -> f a :@@: xs
+  -> g a :@@: ys
+preserving00 f x = f @a Witness x & \(RestrictingSome Witness y) -> unsafeCoerce y
+{- [markdown]
+But a `Witness` could also escape through `g a :@@: ys`.
+We can patch that hole is relatively easily by requiring the `Witness x` to be consumed linearly.
+
+This only permits `Setter` optics though, which is a bit disappointing.
+We need to extend the "proof" further to allow functions that produce a functorial context of `RestrictingSome`, like `forall x f g h xs ys. Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys)`.
+This is tricky because `h` is also universally quantified and could be chosen to be something like
+-}
 
 data ConstWitness a where
   ConstWitness :: Witness x %1 -> ConstWitness a
+-- remove witness
 
 {- [markdown]
-which would allow the Witness value to enter `Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys)`-functions elsewhere, e.g. through `f x :@@: xs`.
-To prevent this, we need to require `h (ExistentiallyIndexed f x)` to contain at least one `ExistentiallyIndexed f x`.
+which would allow the Witness value to enter `Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys)`-functions elsewhere, e.g. through `f x :@@: xs`.
+We apply the same trick as for `Fresh`-tokens: we require the produced value to be `Dupable` and give no `Dupable` instance for `Witness`.
+However, we can't require `Dupable (h (RestrictingSome g ys))` directly, because `RestrictingSome g ys` contains a `Witness`.
+Instead we require `Dupable (h ())` which is just as effective.
+
+This imposes a stringent limitation on `h` though.
+Aside from `Witness`-tokens, `h` also can't contain other non-`Dupable` values like `a -> b`.
+This is problematic for functors like `StateT`.
+It's possible to create a `StateT` that *is* `Dupable` by redefining it as a `data` type instead of a `newtype`, but such a `StateT` could never contain an `RestrictingSome`, because it would consume the `Witness`-value inside non-linearly.
+
+
+I've considered various other ways to limit `h` to protect the `Witness`, but
+
+To prevent this, we need to require `h (RestrictingSome f x)` to contain at least one `RestrictingSome f x`.
 Luckily, a solution for this already exists: linear control functors.
 I'd never heard about them before this project and I only ran into them because I was confused which `Functor` module from `linear-base` I needed to import.
 I recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/) on them if you're unfamiliar, but I'll also briefly explain here.
@@ -508,25 +572,24 @@ To show why it is not, I first need to write a function that actually uses the "
 -}
 
 -- todo: check linearity of all functions
--- todo: rename witness
 
 preserving0
   :: forall h f g xs ys a
    . (Control.Functor h, Functor h) -- The normal non-linear Functor is not a superclass of Control.Functor, so we need to add both.
-  => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
+  => (forall x. Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys))
   -> f a :@@: xs
   -> h (g a :@@: ys)
-preserving0 f x = f @a Witness x NL.<&> \(ExistentiallyIndexed Witness y) -> unsafeCoerce y
+preserving0 f x = f @a Witness x NL.<&> \(RestrictingSome Witness y) -> unsafeCoerce y
 
 problem =
   NL.fst $
-    preserving0 @((,) (ExistentiallyIndexed Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
-      (\w l -> (ExistentiallyIndexed w l, error "The consequences of my actions"))
+    preserving0 @((,) (RestrictingSome Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
+      (\w l -> (RestrictingSome w l, error "The consequences of my actions"))
       VNil
 
 -- very specific simple Show instance for the purpose of this example
-instance Show a => Show (ExistentiallyIndexed Vec (LoT1 a)) where
-  show (ExistentiallyIndexed w x) = show (w, x)
+instance Show a => Show (RestrictingSome Vec (LoT1 a)) where
+  show (RestrictingSome w x) = show (w, x)
 
 -- >>> problem
 -- (Witness,VNil)
@@ -535,9 +598,9 @@ We have successfully ignored the consequences of our actions and thus obtained a
 That could be abused to cause all sorts of mayhem in other uses of `preserving0`.
 
 As mentioned before, the problem lies with strictness, or rather laziness in this case.
-The caller of `preserving0` can always choose not to evaluate the `ExistentiallyIndexed` in the right side of the tuple, and thus the passed witness can escape.
-It's not enough to call `deepseq` on the produced `h (ExistentiallyIndexed g ys)`, because if we take `h` as `State s` for example, `deepseq` would not ensure `g a :@@: ys` is evaluated to weak-head-normal-form before the tuple in the definition of `State` is created (and the `NFData` instance for `a -> b` has been deprecated for a while anyway).
-Moreover, we don't want to force the entire `h (ExistentiallyIndexed g ys)`-value.
+The caller of `preserving0` can always choose not to evaluate the `RestrictingSome` in the right side of the tuple, and thus the passed witness can escape.
+It's not enough to call `deepseq` on the produced `h (RestrictingSome g ys)`, because if we take `h` as `State s` for example, `deepseq` would not ensure `g a :@@: ys` is evaluated to weak-head-normal-form before the tuple in the definition of `State` is created (and the `NFData` instance for `a -> b` has been deprecated for a while anyway).
+Moreover, we don't want to force the entire `h (RestrictingSome g ys)`-value.
 
 We need a `fmap` that allows evaluating a part of the `a` in `f a` to weak-head-normal-form before producing an `f b` (or the result of a function that produces `b` in cases that embed a function like `StateT s m`).
 It must be "a part of `a`", because if we implement this for `StateT s m`, we need to recursively apply the function to `m (a, s)`, and we want to evaluate a part of that `a`, not `m`'s "element" (the tuple `(a, s)`).
@@ -578,15 +641,15 @@ seqAndMap = flip mapAndSeq
 preserving1
   :: forall h f g xs ys a
    . (Control.Functor h, SeqElement h)
-  => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
+  => (forall x. Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys))
   -> f a :@@: xs
   -> h (g a :@@: ys)
-preserving1 f x = f @a Witness x `seqAndMap` \(ExistentiallyIndexed Witness y) -> (unsafeCoerce y, Just ())
+preserving1 f x = f @a Witness x `seqAndMap` \(RestrictingSome Witness y) -> (unsafeCoerce y, Just ())
 
 problemSolved =
   NL.fst $
-    preserving1 @((,) (ExistentiallyIndexed Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
-      (\w l -> (ExistentiallyIndexed w l, error "The consequences of my actions"))
+    preserving1 @((,) (RestrictingSome Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
+      (\w l -> (RestrictingSome w l, error "The consequences of my actions"))
       VNil
 
 -- >>> problemSolved
@@ -603,30 +666,30 @@ Also conceptually, our requirement of `h` that it contains at least one element 
 For example, it's fine if `h` does not contain `a` when `h ()` is `Dupable`, because that would prevent `h` from containing a `Witness`.
 But `StateT s m ()` is not `Dupable` despite not containing a `Witness`, so that rule is also overly restrictive.
 
-To discover a more suitable general rule, let's first look at conversions between `ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)`-functions and rank-2 based existentials:
+To discover a more suitable general rule, let's first look at conversions between `RestrictingSome f xs %1 -> h (RestrictingSome g ys)`-functions and rank-2 based existentials:
 -}
 
 expose0
   :: forall x h f g xs ys
    . (Control.Functor h, SeqElement h)
-  => (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> f x :@@: xs -> h (g x :@@: ys)
-expose0 f = preserving1 @_ @f @g @xs @ys @x $ \w x -> f (ExistentiallyIndexed w x)
+  => (RestrictingSome f xs %1 -> h (RestrictingSome g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+expose0 f = preserving1 @_ @f @g @xs @ys @x $ \w x -> f (RestrictingSome w x)
 
 hide0
   :: forall h f g xs ys
    . (Control.Functor h, Functor h)
   => (forall x. f x :@@: xs -> h (g x :@@: ys))
-  -> ExistentiallyIndexed f xs
-  %1 -> h (ExistentiallyIndexed g ys)
-hide0 f (ExistentiallyIndexed @x w x) = Control.fmap (\(Ur y) -> ExistentiallyIndexed w y) L.$ Ur <$> f @x x
+  -> RestrictingSome f xs
+  %1 -> h (RestrictingSome g ys)
+hide0 f (RestrictingSome @x w x) = Control.fmap (\(Ur y) -> RestrictingSome w y) L.$ Ur <$> f @x x
 {- [markdown]
-The function `expose0` exposes the existential type hidden in `ExistentiallyIndexed`, while `hide0` hides a type in `ExistentiallyIndexed`.
+The function `expose0` exposes the existential type hidden in `RestrictingSome`, while `hide0` hides a type in `RestrictingSome`.
 Note that `hide0` actually uses the `Control.Functor h` constraint to move the linear `Witness` w into `h`.
 
-The insight that leads to a looser requirement for safe `h`'s is that there is a another way to move a linear value into a functor: `L.liftA2 (\w' (Ur y) -> ExistentiallyIndexed w' y) (Control.pure w) hy`.
+The insight that leads to a looser requirement for safe `h`'s is that there is a another way to move a linear value into a functor: `L.liftA2 (\w' (Ur y) -> RestrictingSome w' y) (Control.pure w) hy`.
 That uses `Control.pure` from `Control.Applicative`, which is of course a subclass of `Control.Functor`, so it does not help yet.
-`Control.pure` can not be implemented for something like `ConstWitness`, so requiring an implementation for `h` guards against some bad cases, but not all yet: 
-
+`Control.pure` can not be implemented for something like `ConstWitness`, so requiring an implementation for `h` guards against some bad cases, but not all yet:
+-- todo
  also guards against these cases that let the `Witness` escape, even without the `Control.Functor` superclass.
 Because of that, we can split `Control.pure` out into a separate class that does not extend `Control.Functor`.
 This has been done for the non-linear pure as well, and it's called [`Pointed`](https://hackage.haskell.org/package/pointed-5.0.5/docs/Data-Pointed.html).
@@ -677,10 +740,10 @@ class AffineFunctor f => AffineApplicative f where
     :: (Consumable a, Consumable b)
     => (a %1 -> b %1 -> c) -> f a %1 -> f b %1 -> f c
 
-instance Consumable e => AffineApplicative (Either e) where
+instance AffineApplicative (Either e) where
   aPure = Right
-  aLiftA2 _ (Left e) r = lseq r L.$ Left e
-  aLiftA2 _ l (Left e) = lseq l L.$ Left e
+  aLiftA2 _ (Left e) (Right r) = lseq r L.$ Left e
+  aLiftA2 _ (Right l) (Left e) = lseq l L.$ Left e
   aLiftA2 f (Right a) (Right b) = Right L.$ f a b
 
 instance (AffineApplicative m, L.Functor m, Consumable e) => AffineApplicative (ExceptT e m) where
@@ -689,8 +752,8 @@ instance (AffineApplicative m, L.Functor m, Consumable e) => AffineApplicative (
 
 instance Control.Monad m => AffineApplicative (StateT s m) where
   aPure a = StateT L.$ \s -> Control.pure (a, s)
-  aLiftA2 f (StateT ta) tb = StateT L.$ \s0 -> do
-    ta s0 >>= \(a, s1) ->
+  aLiftA2 f (StateT ta) tb = StateT L.$
+    ta >=> \(a, s1) ->
       Control.fmap (\(b, s2) -> (f a b, s2)) L.$ runStateT tb s1
 
 data Dict :: Constraint -> Type where
@@ -721,39 +784,39 @@ instance
 preserving
   :: forall h f g xs ys a
    . Capturing h
-  => (forall x. Witness x %1 -> f x :@@: xs -> h (ExistentiallyIndexed g ys))
+  => (forall x. Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys))
   -> f a :@@: xs
   -> h (g a :@@: ys)
-preserving f x = f @a Witness x `seqAndMap` \(ExistentiallyIndexed Witness y) -> (unsafeCoerce y, Just ())
+preserving f x = f @a Witness x `seqAndMap` \(RestrictingSome Witness y) -> (unsafeCoerce y, Just ())
 
 expose
   :: forall x h f g xs ys
    . (Capturing h, Functor h)
-  => (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> f x :@@: xs -> h (g x :@@: ys)
-expose f = preserving @_ @f @g @xs @ys @x $ \w x -> f (ExistentiallyIndexed w x)
+  => (RestrictingSome f xs %1 -> h (RestrictingSome g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+expose f = preserving @_ @f @g @xs @ys @x $ \w x -> f (RestrictingSome w x)
 
 hide
   :: forall h f g xs ys
    . (Capturing h, Functor h)
   => (forall x. f x :@@: xs -> h (g x :@@: ys))
-  -> ExistentiallyIndexed f xs
-  %1 -> h (ExistentiallyIndexed g ys)
-hide f (ExistentiallyIndexed @x w x) =
+  -> RestrictingSome f xs
+  %1 -> h (RestrictingSome g ys)
+hide f (RestrictingSome @x w x) =
   let
     hy = Ur <$> f @x x
   in
     case applicativeOrControl @h of
-      Left Dict -> aLiftA2 (\w' (Ur y) -> ExistentiallyIndexed w' y) (point w) hy
-      Right Dict -> Control.fmap (\(Ur y) -> ExistentiallyIndexed w y) hy
+      Left Dict -> aLiftA2 (\w' (Ur y) -> RestrictingSome w' y) (point w) hy
+      Right Dict -> Control.fmap (\(Ur y) -> RestrictingSome w y) hy
 
 instance Consumable (Witness x) where
   consume Witness = ()
 
-instance Consumable (ExistentiallyIndexed f xs) where
-  consume (ExistentiallyIndexed w _) = consume w
+instance Consumable (RestrictingSome f xs) where
+  consume (RestrictingSome w _) = consume w
 
 {- [markdown]
-The function `expose` exposes the existential type hidden in `ExistentiallyIndexed`, while `hide` hides a type in `ExistentiallyIndexed`.
+The function `expose` exposes the existential type hidden in `RestrictingSome`, while `hide` hides a type in `RestrictingSome`.
 Now we can move on to the optics bit.
 -}
 
@@ -768,7 +831,7 @@ instance Functor (Vec n) where
 -- Like `LensLike`, but it preserves the hidden index in the foci.
 type PreservingLensLike h s t f xs g ys =
   Capturing h
-  => Lens.Over (FUN One) h s t (ExistentiallyIndexed f xs) (ExistentiallyIndexed g ys) -- = (ExistentiallyIndexed f xs %1 -> h (ExistentiallyIndexed g ys)) -> s -> h t
+  => Lens.Over (FUN One) h s t (RestrictingSome f xs) (RestrictingSome g ys) -- = (RestrictingSome f xs %1 -> h (RestrictingSome g ys)) -> s -> h t
 
 partsOf
   :: (Capturing f, Functor f, Capturing f)
@@ -820,7 +883,7 @@ I need it for something I plan to write an article about later™.
 Something else worth noting about the code block above is that we can actually define `PreservingLensLike` using an existing type from `lens`.
 Some optic combinators already abstract in the profunctor in the optics transformation, so combinators like [`taking`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:taking) and [`failing`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:failing) should also work with "preserving" optics.
 
-Speaking of standard optics, wouldn't it be nice if we could use them on `ExistentiallyIndexed` and compose them with preserving optics?
+Speaking of standard optics, wouldn't it be nice if we could use them on `RestrictingSome` and compose them with preserving optics?
 -}
 
 type instance Lens.Index (Vec n a) = Int
@@ -836,8 +899,8 @@ hidden
    . (Capturing f, Functor f)
   => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
   -> (a -> f b)
-  -> ExistentiallyIndexed s xs
-  %1 -> f (ExistentiallyIndexed t ys)
+  -> RestrictingSome s xs
+  %1 -> f (RestrictingSome t ys)
 hidden o f = hide $ \ @n -> o @n f
 
 demo2 :: [Either Bool Char]
@@ -853,7 +916,7 @@ main = print demo2
 -- prints [Left True,Right 'h',Left False,Right 'I']
 -- notice how the "i" at the end is now capitalized
 {- [markdown]
-As shown we can run standard optics like `Lens.ix` on `ExistentiallyIndexed` foci using the `hidden` combinator.
+As shown we can run standard optics like `Lens.ix` on `RestrictingSome` foci using the `hidden` combinator.
 And while the example does not show it, you can see from the type of hidden that we could precompose it with standard optics (like `hidden (...) . standardOptic`), because the arrow in `(a -> f b)` in `hidden`'s type is not linear.
 
 Finally, I'd also like to show how to define `Getter`s for preserving optics, because this was not possible with some of my failed ideas for preserving optics.
