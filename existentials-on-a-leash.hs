@@ -1,7 +1,3 @@
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE LinearTypes #-}
-{-# LANGUAGE TypeAbstractions #-}
-{-# LANGUAGE TypeFamilies #-}
 {- [markdown]
 # Existentials on a leash
 
@@ -52,6 +48,10 @@ We'll work out the second option, but first we need to enable some language exte
 <summary>Imports and language extensions</summary>
 
 -}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE LinearTypes #-}
+{-# LANGUAGE TypeAbstractions #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -Wall -Wno-missing-signatures -Wno-unused-top-binds -Wno-orphans #-}
 
 {- HLINT ignore "Use first" -}
@@ -75,7 +75,7 @@ index-state: 2026-03-18T08:38:52Z
 semaphore: True
 -}
 
-import Control.Functor.Linear hiding (Applicative (..), Functor (..), (<$>))
+import Control.Functor.Linear (Monad (..), StateT (..))
 import Control.Functor.Linear qualified as Control
 import Control.Lens qualified as Lens
 import Control.Lens.Internal.Bazaar qualified as Lens
@@ -86,7 +86,7 @@ import Data.Bifunctor.Linear
 import Data.Char
 import Data.Functor qualified as NL
 import Data.Functor.Identity
-import Data.Functor.Linear qualified as L
+import Data.Functor.Linear
 import Data.Kind
 import Data.List as NL
 import Data.Maybe
@@ -99,15 +99,16 @@ import GHC.Base (Multiplicity (..), TYPE)
 import Prelude.Linear hiding (fst, ($), (.))
 import Prelude.Linear qualified as L
 import Unsafe.Coerce (unsafeCoerce)
-import Prelude as NL (Applicative (..), Functor (..), const, ($), (<$>))
+import Prelude (($))
+import Prelude qualified as NL
 
 -- Multiplicity polymorphic version of `(.)` which works in most non-linear code as well.
 (.) :: forall {rep} b (c :: TYPE rep) a m n. (b %m -> c) %n -> (a %m -> b) %m -> a %m -> c
 (.) f g x = f (g x)
 infixr 9 .
 
-(>=>) :: Monad m => (a %1 -> m b) %1 -> (b %1 -> m c) %1 -> a %1 -> m c
-f >=> g = \x -> f x >>= g
+(<&>) :: Functor f => f a %1 -> (a %1 -> b) -> f b
+(<&>) = flip (<$>)
 
 {- [markdown]
 </details>
@@ -358,18 +359,14 @@ instance Consumable a => Consumable (Vec n a) where
   consume (VCons x xs) = lseq x L.$ consume xs
 
 instance Dupable a => Dupable (Vec n a) where
-  dupR VNil = L.pure VNil
-  dupR (VCons x xs) = VCons L.<$> dupR x L.<*> dupR xs
+  dupR VNil = pure VNil
+  dupR (VCons x xs) = VCons <$> dupR x <*> dupR xs
 
 instance Consumable a => Consumable (SomeVec a) where
   consume (SomeVec v) = consume v
 
 instance Dupable a => Dupable (SomeVec a) where
-  dupR (SomeVec v) = SomeVec L.<$> dupR v
-
-instance L.Functor (Vec n) where
-  fmap _ VNil = VNil
-  fmap f (VCons x xs) = VCons (f x) L.$ L.fmap f xs
+  dupR (SomeVec v) = SomeVec <$> dupR v
 
 instance Consumable (Fresh a) where
   consume (Fresh Refl) = ()
@@ -443,8 +440,8 @@ Luckily, we can define a `lazyVecFromList` that hides all of the linear-types co
 
 lazyVecFromList :: [a] -> SomeVec a
 lazyVecFromList xs =
-  unpack (SomeVec L.. lazyVecFromList1 (fmap Ur xs))
-    & \(SomeVec vec) -> SomeVec $ L.fmap unur vec
+  unpack (SomeVec L.. lazyVecFromList1 (NL.fmap Ur xs))
+    & \(SomeVec vec) -> SomeVec $ NL.fmap (forget unur) vec
 
 {- [markdown]
 
@@ -468,147 +465,179 @@ The rest of this section is dedicated to this technique.
 First, we have to wrap the focus in a type like `data Some f = forall x. Some (f x)`.
 This relieves us from having to quantify `n` existentially in optics like `(forall n. Vec n a -> f (Vec n b)) -> s -> f t` thus making it into a normal `lens` optic.
 Then, if a function `fun` producing a `Some`-value, can only do so by returning a `Some`-value that it received as an argument, we can infer that the `x` inside the produced value must be the same as the one the function was applied to.
-Written out in code, we would have `hide :: (Some f -> Some g) -> f x -> g x` defined as `fx = fun (Some fx) & \(Some gy) -> unsafeCoerce gy`, with some constraints on `(Some f -> Some g)` to ensure it has to return the value given as an argument.
+Written out in code, we would have `expose :: (Some f -> Some g) -> f x -> g x` defined as `expose f x = f (Some x) & \(Some y) -> unsafeCoerce y`, with some constraints on `(Some f -> Some g)` to ensure it has to return the value given as an argument.
 
 Obviously the `Some` constructor needs to be hidden, but we also need to prevent `Some`-values from being reused or swapped with `Some`-value with a different origin.
 Making `fun` linear achieves this, but also reduces the space of possible functions to the identity function.
 
 Since it's not very interesting to apply optics to the identity function, there should at least be a function `mapSome :: (forall x. f x -> g x) -> Some f %1 -> Some g`.
 That still only allows `Setter` optics though.
-For most optics we need something like `traverseSome :: Functor h => (forall x. f x -> h (g x)) -> Some f %1 -> h (Some g)` (which we will call `expose` from now on).
-This also requires adapting `hide`, changing its type to `(Some f %1 -> h (Some g)) -> f x -> h (g x)`
-However, this is problematic, because if `h` is chosen to be something like `Const (Some f)`, a `Some`-value can escape and be used non-linearly.
+For most optics we need something like `traverseSome :: Functor h => (forall x. f x -> h (g x)) -> Some f %1 -> h (Some g)` (which we will call `hide` from now on).
+This also requires adapting `expose`, changing its type to `(Some f %1 -> h (Some g)) -> f x -> h (g x)`
+Without additional constraints, both `expose` and `hide` defined like this are unsafe:
+ * if `h` is chosen to be something like `Const (Some f)`, `expose` could let a `Some`-value can escape and be used non-linearly. We could apply our previous trick and require that `h ()` is `Dupable`, but that would preclude using `StateT` and other functors which contain a function.
+ * if `h` is chosen to be something like `[]`, `hide` could duplicate `Some`-values, because the argument function is not linear. We could make the argument function linear too, but that quite a stringent constraint.
 
-We could apply our previous trick and require that `h ()` is `Dupable`, but that would forbid using `StateT` and other functors which contain a function.
-We could also require that `h` is a linear control functor, i.e. it admits a function `fmap :: (a %1 -> b) %1 -> h a %1 -> h b`.
+We can also solve both problems by requiring that `h` is a linear control functor, i.e. it admits a function `fmap :: (a %1 -> b) %1 -> h a %1 -> h b`.
 If you don't know about linear control functors and the difference with linear data functors, I recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/).
 What's important here is that linear control functors always contain exactly one element `a` (because the `fmap` is linear in `(a %1 -> b)`).
-Because of this, we can be sure that a `h (g x)` produced by `hide` does not contain any `Some`-values (if Haskell were strict, but we'll get to that).
+Because of this, we can be sure that a `h (g x)` produced by `expose` does not contain any `Some`-values (if Haskell were strict, but we'll get to that) and the `h (g x)` in `hide` contains just one `g x`.
+
 But this is also very restrictive, because it forbids functors like `Either e`, because `Left` does not contain an `a`.
-
-I think the solution that will fit most use cases is to require that `h` is either a linear control functor, or an instance of a affine version of [`Alt`](https://hackage-content.haskell.org/package/semigroupoids-6.0.2/docs/Data-Functor-Alt.html):
-
+I think the solution that fits most use cases is to require that `h` is either a linear control functor or both an instance of an linear version of [`Alt`](https://hackage-content.haskell.org/package/semigroupoids-6.0.2/docs/Data-Functor-Alt.html) and an "affine" data functor:
 -}
 
-class AffineAlt f where
+-- This Functor is the linear data Functor
+class Functor f => Alt f where
   (<!>) :: Consumable a => f a %1 -> f a %1 -> f a
+
+data Affine a where
+  Affine :: a -> Affine a -- explicit non-linear constructor. Consider the constructor hidden
+
+instance Consumable (Affine a) where
+  consume (Affine _) = ()
+
+affine :: a -> Affine a
+affine = Affine
+
+runAffine :: Affine a %1 -> a
+runAffine (Affine a) = a
+
+liftAffine :: (a -> b) -> Affine a %1 -> Affine b
+liftAffine f (Affine a) = Affine L.$ f a
+
+class Functor f => AffineFunctor f where
+  afmap :: Affine (a %1 -> b) %1 -> f a %1 -> f b
+
 {- [markdown]
-This definition of `Alt` is "affine" because it will consume all linear arguments at most once, instead of exactly once.
-Functors that store any non-`Consumable` data can not be an instance of `AffineAlt` due to the "left distribution" and "left catch" laws (instances of `Alt` must satisfy at least one of the two):
-\* left distribution regarding `<*>`: `(a <!> b) <*> c = (a <*> c) <!> (b <*> c)`
-\* left catch: `pure a <!> b = pure a`
+`Alt` makes `expose` safe while `AffineFunctor` makes `hide` safe.
+Let's focus on `Alt` and `expose` first.
+
+Functors that store any non-`Consumable` data other than `a` can not be an instance of `Alt` due to the "left distribution" and "left catch" laws (instances of `Alt` must satisfy at least one of the two):
+ * left distribution regarding `<*>`: `(a <!> b) <*> c = (a <*> c) <!> (b <*> c)`
+ * left catch: `pure a <!> b = pure a`
+
 The reason that these laws exclude functors with non-`Consumable` data is simplest for the left catch law: `<!>` must be able to consume/discard any `b`.
 Instances that satisfy the left distribution law must do the same, because any data from `c` that is not consumed/discarded is duplicated on the right side of the `=`-sign.
-This way, functors like `Const (Some f)` and `Either (Some f)` or forbidden while `Either e` with some `Consumable` `e` are still allowed.
 
-There are 2 small things to get out of the way before we go to the implementation of `hide` and `expose`:
- 1. We don't want `Some` to work only for types of kind `k -> Type`.
-    We will use the kind-heterogeneous type-level lists from `kind-apply`, named [`LoT`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t:LoT) (for List of Types) and the operator [`:@@:`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t::-64--64-:) which applies an `LoT` to a type constructor.
- 2. In the end, we will need both linear and non-linear versions of `Some`, so we will make it parametric in its multiplicity.
+Because of this, we can be sure that an `h` produced by `expose` does not contain any `Some`-values.
+This way, functors like `Const (Some f)` and `Either (Some f)` are forbidden while `Either e` with some `Consumable` `e` are still allowed.
+
+Now let's look at `AffineFunctor`.
+It's similar to a linear control functor in that the mapping function (wrapped in `Affine`) needs to be consumed linearly.
+However, the `Affine` wrapper actually stores the function in a non-linear field, which allows `Affine` to be `Consumable`.
+Thus, instances of `AffineFunctor` must use the mapping function at most once.
+To make `Affine` generally useful, it could have all the instances a (linear) newtype would have, except `Dupable`.
+It's equivalent to `Ur` except in that aspect.
+
+There is just one small thing to get out of the way before we go to the implementation of `expose` and `expose`: we don't want `Some` to work only for types of kind `k -> Type`.
+We will use the kind-heterogeneous type-level lists from `kind-apply`, named [`LoT`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t:LoT) (for List of Types) and the operator [`:@@:`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t::-64--64-:) which applies a type constructor to a `LoT`.
+
+We'll start with an `Alt`/`AffineFunctor`-based definitions of `hide` and `expose` and extend them to allow linear control functors as alternative later.
 -}
-
-data Witness x = Witness -- consider the constructor hidden
-  deriving (Show)
-
-data RestrictingSome f xs where
-  RestrictingSome :: Witness y %1 -> f y :@@: xs -> RestrictingSome f xs -- Note the linear arrow for `Witness x`
-{- [markdown]
-
-Since there are no other sources of `Witness` in scope, the only way to obtain a `Witness` value is from the argument of the function.
-Hence we can derive `x ~ y`.
-
-Now we can make the functions meant in the second idea concrete.
-An example would be a function with type `forall x f g xs ys. Witness x -> f x :@@: xs -> RestrictingSome g ys`.
-To be able to infer `x ~ y`, we can't just hand the `RestrictingSome g ys` with the `Witness` inside back to the caller.
-We will wrap it in a function `preserving0`:
--}
-
-preserving00
-  :: forall f g xs ys a
-   . (forall x. Witness x -> f x :@@: xs -> RestrictingSome g ys)
-  -> f a :@@: xs
-  -> g a :@@: ys
-preserving00 f x = f @a Witness x & \(RestrictingSome Witness y) -> unsafeCoerce y
-{- [markdown]
-But a `Witness` could also escape through `g a :@@: ys`.
-We can patch that hole is relatively easily by requiring the `Witness x` to be consumed linearly.
-
-This only permits `Setter` optics though, which is a bit disappointing.
-We need to extend the "proof" further to allow functions that produce a functorial context of `RestrictingSome`, like `forall x f g h xs ys. Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys)`.
-This is tricky because `h` is also universally quantified and could be chosen to be something like
--}
-
-data ConstWitness a where
-  ConstWitness :: Witness x %1 -> ConstWitness a
--- remove witness
-
-{- [markdown]
-which would allow the Witness value to enter `Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys)`-functions elsewhere, e.g. through `f x :@@: xs`.
-We apply the same trick as for `Fresh`-tokens: we require the produced value to be `Dupable` and give no `Dupable` instance for `Witness`.
-However, we can't require `Dupable (h (RestrictingSome g ys))` directly, because `RestrictingSome g ys` contains a `Witness`.
-Instead we require `Dupable (h ())` which is just as effective.
-
-This imposes a stringent limitation on `h` though.
-Aside from `Witness`-tokens, `h` also can't contain other non-`Dupable` values like `a -> b`.
-This is problematic for functors like `StateT`.
-It's possible to create a `StateT` that *is* `Dupable` by redefining it as a `data` type instead of a `newtype`, but such a `StateT` could never contain an `RestrictingSome`, because it would consume the `Witness`-value inside non-linearly.
-
-
-I've considered various other ways to limit `h` to protect the `Witness`, but
-
-To prevent this, we need to require `h (RestrictingSome f x)` to contain at least one `RestrictingSome f x`.
-Luckily, a solution for this already exists: linear control functors.
-I'd never heard about them before this project and I only ran into them because I was confused which `Functor` module from `linear-base` I needed to import.
-I recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/) on them if you're unfamiliar, but I'll also briefly explain here.
-
-In short, in the linear world, there are 2 types of functors: data functors and control functors.
-The type of `Control.Functor.Linear.fmap` is `(a %1 -> b) %1 -> f a %1 -> f b`, while the type of `Data.Functor.Linear.fmap` is `(a %1 -> b) -> f a %1 -> f b`.
-The key difference with data functors is that a control functor consumes its argument function linearly (`%1` on the second arrow) while data functors don't.
-Thus, only functors that contain their argument type exactly once can be control functors.
-For example `State` and `IO` are control functors, while `[]` and `Const` aren't.
-
-In a strict programming language, the above would be enough.
-To show why it is not, I first need to write a function that actually uses the "proof":
--}
-
 -- todo: check linearity of all functions
 
-preserving0
-  :: forall h f g xs ys a
-   . (Control.Functor h, Functor h) -- The normal non-linear Functor is not a superclass of Control.Functor, so we need to add both.
-  => (forall x. Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys))
-  -> f a :@@: xs
-  -> h (g a :@@: ys)
-preserving0 f x = f @a Witness x NL.<&> \(RestrictingSome Witness y) -> unsafeCoerce y
+data Some f xs where
+  Some :: forall x f xs. f x :@@: xs -> Some f xs
+
+hideAffineFunctor
+  :: (AffineFunctor h, NL.Functor h)
+  => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
+hideAffineFunctor f (Some @x x) = Some @x NL.<$> f @x x -- sadly we need to use a non-linear fmap here because `Some` is non-linear
+
+exposeAlt
+  :: forall x h f g xs ys
+   . Alt h
+  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+exposeAlt f x = f (Some @x x) <&> \(Some y) -> unsafeCoerce y
+
+{- [markdown]
+
+<details>
+<summary>Some example instances of `Alt` and `AffineFunctor` to check the most common functors admit an instance.</summary>
+
+-}
+instance Alt Identity where
+  (<!>) = flip lseq
+
+instance Consumable a => Consumable (Identity a) where
+  consume (Identity a) = consume a
+
+instance (Alt m, Consumable s) => Alt (NL.StateT s m) where
+  NL.StateT f <!> NL.StateT g = NL.StateT L.$ \s -> f s <!> g s
+
+instance Functor m => Functor (NL.StateT s m) where
+  fmap f (NL.StateT t) = NL.StateT L.$ \s -> fmap (first f) L.$ t s
+
+instance Consumable e => Alt (Either e) where
+  Left e1 <!> Left e2 = lseq e2 L.$ Left e1
+  Left e1 <!> r = lseq e1 r
+  Right a <!> r = lseq r L.$ Right a
+
+instance (Monad m, Alt m, Consumable e) => Alt (ExceptT e m) where
+  ExceptT m <!> ExceptT n =
+    ExceptT L.$ m >>= \case
+      Right a -> Control.pure (Right a) <!> n -- have to consume n with <!> due to linearity. Using lseq is to restrictive.
+      -- because of the case above, this instance only satisfies the left catch law when m satisfies the left catch law, and it only satisfies the left distribution law when m satisfies the left distribution law.
+      -- In turn, the case below must satisfy both laws and can not mappend the e to another e from n, like the `Alt ExceptT` instance in semigroupoids does.
+      Left e -> lseq e n
+
+instance AffineFunctor Identity where
+  afmap f (Identity a) = Identity L.$ runAffine f a
+
+instance AffineFunctor m => AffineFunctor (NL.StateT s m) where
+  afmap f (NL.StateT t) = NL.StateT L.$ \s -> afmap (liftAffine first f) L.$ t s
+
+instance AffineFunctor (Either e) where
+  afmap f (Left e) = lseq f L.$ Left e
+  afmap f (Right a) = Right L.$ runAffine f a
+
+instance AffineFunctor m => AffineFunctor (ExceptT e m) where
+  afmap f (ExceptT m) = ExceptT L.$ afmap (liftAffine fmap f) m
+
+{- [markdown]
+
+</details>
+
+Now let's consider a version `expose` that uses linear control functors instead of `Alt`.
+Like I said before, these only guarantee that a `h (g x)` produced by `expose` does not contain any `Some`-values if Haskell were strict.
+Let me show why.
+-}
+
+exposeControlFunctor
+  :: forall x h f g xs ys
+   . Control.Functor h
+  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+exposeControlFunctor f x = f (Some @x x) <&> \(Some y) -> unsafeCoerce y
 
 problem =
   NL.fst $
-    preserving0 @((,) (RestrictingSome Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
-      (\w l -> (RestrictingSome w l, error "The consequences of my actions"))
+    exposeControlFunctor @_ @((,) (Some Vec (LoT1 Int)))
+      (\s -> (s, error "The consequences of my actions"))
       VNil
 
 -- very specific simple Show instance for the purpose of this example
-instance Show a => Show (RestrictingSome Vec (LoT1 a)) where
-  show (RestrictingSome w x) = show (w, x)
+instance Show a => Show (Some Vec (LoT1 a)) where
+  show (Some x) = "Some (" <> show x <> ")"
 
 -- >>> problem
--- (Witness,VNil)
+-- Some (VNil)
 {- [markdown]
-We have successfully ignored the consequences of our actions and thus obtained an unrestricted `Witness`-value!
+We have successfully ignored the consequences of our actions and thus obtained an unrestricted `Some`-value!
 That could be abused to cause all sorts of mayhem in other uses of `preserving0`.
 
 As mentioned before, the problem lies with strictness, or rather laziness in this case.
-The caller of `preserving0` can always choose not to evaluate the `RestrictingSome` in the right side of the tuple, and thus the passed witness can escape.
-It's not enough to call `deepseq` on the produced `h (RestrictingSome g ys)`, because if we take `h` as `State s` for example, `deepseq` would not ensure `g a :@@: ys` is evaluated to weak-head-normal-form before the tuple in the definition of `State` is created (and the `NFData` instance for `a -> b` has been deprecated for a while anyway).
-Moreover, we don't want to force the entire `h (RestrictingSome g ys)`-value.
+The caller of `exposeControlFunctor` can always choose not to evaluate the `Some` in the right side of the tuple, and thus the `Some` in the left side can escape.
+It's not enough to call `deepseq` on the produced `h (Some g ys)`, because if we take `h` as `State s` for example, `deepseq` would not ensure `g x :@@: ys` is evaluated to weak-head-normal-form before the tuple in the definition of `State` is created (and the `NFData` instance for `a -> b` has been deprecated for a while anyway).
+Moreover, we don't want to force the entire `h (Some g ys)`-value.
 
-We need a `fmap` that allows evaluating a part of the `a` in `f a` to weak-head-normal-form before producing an `f b` (or the result of a function that produces `b` in cases that embed a function like `StateT s m`).
+We need a `fmap` that allows evaluating a part of the `a` in `f a` to weak-head-normal-form before producing an `f b` (or the result of a function that produces `b` in cases that the functor embeds a function, like `StateT s m`).
 It must be "a part of `a`", because if we implement this for `StateT s m`, we need to recursively apply the function to `m (a, s)`, and we want to evaluate a part of that `a`, not `m`'s "element" (the tuple `(a, s)`).
 
 We'll accomplish this with a new class called `SeqElement` (name is subject to change):
 -}
-class L.Functor f => SeqElement f where
-  mapAndSeq :: Consumable c => (a %1 -> (b, Maybe c)) -> f a %1 -> f b
+class Control.Functor f => SeqElement f where
+  mapAndSeq :: Consumable c => (a %1 -> (b, Maybe c)) %1 -> f a %1 -> f b
 
 {- [markdown]
 Let't check that we can define instances for `SeqElement` for some common functors.
@@ -618,38 +647,35 @@ instance SeqElement Identity where
   mapAndSeq extract (Identity a) = extract a & \(b, c) -> lseq c L.$ Identity b
 
 instance SeqElement m => SeqElement (StateT s m) where
-  mapAndSeq extract (StateT f) = StateT L.$ mapAndSeq extract' . f
+  mapAndSeq extract (StateT f) = StateT L.$ \s -> mapAndSeq extract' L.$ f s
    where
     extract' (a, s) = extract a & \(b, c) -> ((b, s), c)
-
-instance SeqElement m => SeqElement (ExceptT e m) where
-  mapAndSeq extract (ExceptT m) = ExceptT L.$ flip mapAndSeq m L.$ \case
-    Left e -> (Left e, Nothing)
-    Right a -> first Right L.$ extract a
 
 instance SeqElement ((,) a) where
   mapAndSeq extract (a, b) = extract b & \(d, c) -> lseq c (a, d)
 
 {- [markdown]
 So far so good!
-Let's check that this solves our `problem`.
+Now let's check that this solves our `problem`.
 -}
 
-seqAndMap :: (SeqElement f, Consumable c) => f a %1 -> (a %1 -> (b, Maybe c)) -> f b
+hideSeqElement
+  :: (SeqElement h, NL.Functor h) => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
+hideSeqElement f (Some @x x) = Some @x NL.<$> f @x x
+
+seqAndMap :: (SeqElement f, Consumable c) => f a %1 -> (a %1 -> (b, Maybe c)) %1 -> f b
 seqAndMap = flip mapAndSeq
 
-preserving1
-  :: forall h f g xs ys a
-   . (Control.Functor h, SeqElement h)
-  => (forall x. Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys))
-  -> f a :@@: xs
-  -> h (g a :@@: ys)
-preserving1 f x = f @a Witness x `seqAndMap` \(RestrictingSome Witness y) -> (unsafeCoerce y, Just ())
+exposeSeqElement
+  :: forall x h f g xs ys
+   . SeqElement h
+  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+exposeSeqElement f x = f (Some @x x) `seqAndMap` \(Some y) -> (unsafeCoerce y, Just ())
 
 problemSolved =
   NL.fst $
-    preserving1 @((,) (RestrictingSome Vec (LoT1 Int))) @Vec @_ @(LoT1 Int) @_
-      (\w l -> (RestrictingSome w l, error "The consequences of my actions"))
+    exposeSeqElement @_ @((,) (Some Vec (LoT1 Int)))
+      (\s -> (s, error "The consequences of my actions"))
       VNil
 
 -- >>> problemSolved
@@ -658,165 +684,58 @@ problemSolved =
 {- [markdown]
 Calling a problem "solved" when your function returns an `error` instead of a proper value feels odd, but that's what you get when working with unsafe primitives.
 
-With this, I believe we've finally neutralized the dangers of the `unsafeCoerce` in `preserving`!
-I wasn't quite satisfied though.
-Our current definition requires that `h` is a linear control functor, but that's actually quite a severe limitation.
-For example, `Either e` and `ExceptT m e` are excluded.
-Also conceptually, our requirement of `h` that it contains at least one element `a` is conceptually more strict than necessary.
-For example, it's fine if `h` does not contain `a` when `h ()` is `Dupable`, because that would prevent `h` from containing a `Witness`.
-But `StateT s m ()` is not `Dupable` despite not containing a `Witness`, so that rule is also overly restrictive.
-
-To discover a more suitable general rule, let's first look at conversions between `RestrictingSome f xs %1 -> h (RestrictingSome g ys)`-functions and rank-2 based existentials:
+Now we need to combine `exposeAlt` with `exposeSeqElement` and `hideAlt` with `hideSeqElement` into one.
+We'll define a class `Capturing` that requires a functor to be either an instance `Alt` or an instance of `SeqElement`.
 -}
-
-expose0
-  :: forall x h f g xs ys
-   . (Control.Functor h, SeqElement h)
-  => (RestrictingSome f xs %1 -> h (RestrictingSome g ys)) -> f x :@@: xs -> h (g x :@@: ys)
-expose0 f = preserving1 @_ @f @g @xs @ys @x $ \w x -> f (RestrictingSome w x)
-
-hide0
-  :: forall h f g xs ys
-   . (Control.Functor h, Functor h)
-  => (forall x. f x :@@: xs -> h (g x :@@: ys))
-  -> RestrictingSome f xs
-  %1 -> h (RestrictingSome g ys)
-hide0 f (RestrictingSome @x w x) = Control.fmap (\(Ur y) -> RestrictingSome w y) L.$ Ur <$> f @x x
-{- [markdown]
-The function `expose0` exposes the existential type hidden in `RestrictingSome`, while `hide0` hides a type in `RestrictingSome`.
-Note that `hide0` actually uses the `Control.Functor h` constraint to move the linear `Witness` w into `h`.
-
-The insight that leads to a looser requirement for safe `h`'s is that there is a another way to move a linear value into a functor: `L.liftA2 (\w' (Ur y) -> RestrictingSome w' y) (Control.pure w) hy`.
-That uses `Control.pure` from `Control.Applicative`, which is of course a subclass of `Control.Functor`, so it does not help yet.
-`Control.pure` can not be implemented for something like `ConstWitness`, so requiring an implementation for `h` guards against some bad cases, but not all yet:
--- todo
- also guards against these cases that let the `Witness` escape, even without the `Control.Functor` superclass.
-Because of that, we can split `Control.pure` out into a separate class that does not extend `Control.Functor`.
-This has been done for the non-linear pure as well, and it's called [`Pointed`](https://hackage.haskell.org/package/pointed-5.0.5/docs/Data-Pointed.html).
-We'll define our own linear version:
--}
-
-class L.Functor f => Pointed f where
-  point :: a %1 -> f a
-
-{- [markdown]
-
-<details>
-<summary>Instances</summary>
-
--}
-
-instance Pointed Identity where
-  point = Identity
-
-instance Pointed m => Pointed (StateT s m) where
-  point a = StateT L.$ \s -> point (a, s)
-
-instance Pointed m => Pointed (ExceptT e m) where
-  point a = ExceptT L.$ point L.$ Right a
-{- [markdown]
-</details>
-
-
--}
-
-
-class AffineFunctor f where
-  aMap :: Consumable a => (a %1 -> b) -> f a %1 -> f b
-
-instance AffineFunctor (Either e) where
-  aMap _ (Left e) = Left e
-  aMap f (Right a) = Right L.$ f a
-
-instance L.Functor m => AffineFunctor (ExceptT e m) where
-  aMap f (ExceptT m) = ExceptT L.$ L.fmap (L.fmap f) m
-
-instance L.Functor m => AffineFunctor (StateT s m) where
-  aMap f (StateT t) = StateT L.$ L.fmap (first f) . t
-
-class AffineFunctor f => AffineApplicative f where
-  aPure :: a %1 -> f a
-  aLiftA2
-    :: (Consumable a, Consumable b)
-    => (a %1 -> b %1 -> c) -> f a %1 -> f b %1 -> f c
-
-instance AffineApplicative (Either e) where
-  aPure = Right
-  aLiftA2 _ (Left e) (Right r) = lseq r L.$ Left e
-  aLiftA2 _ (Right l) (Left e) = lseq l L.$ Left e
-  aLiftA2 f (Right a) (Right b) = Right L.$ f a b
-
-instance (AffineApplicative m, L.Functor m, Consumable e) => AffineApplicative (ExceptT e m) where
-  aPure = ExceptT . aPure . Right
-  aLiftA2 f (ExceptT m) (ExceptT n) = ExceptT L.$ aLiftA2 (aLiftA2 f) m n
-
-instance Control.Monad m => AffineApplicative (StateT s m) where
-  aPure a = StateT L.$ \s -> Control.pure (a, s)
-  aLiftA2 f (StateT ta) tb = StateT L.$
-    ta >=> \(a, s1) ->
-      Control.fmap (\(b, s2) -> (f a b, s2)) L.$ runStateT tb s1
 
 data Dict :: Constraint -> Type where
   Dict :: a => Dict a
 
-class SeqElement f => Capturing f where
-  applicativeOrControl :: Either (Dict (AffineApplicative f, Pointed f)) (Dict (Control.Functor f))
+class Capturing f where
+  seqElementOrAltAffine :: Either (Dict (SeqElement f)) (Dict (Alt f, AffineFunctor f))
 
 instance Capturing Identity where
-  applicativeOrControl = Right Dict -- We pick the linear control functor option because it's more efficient than AffineApplicative+Pointed
+  seqElementOrAltAffine = Right Dict -- we pick the Alt option, because expose will use fmap instead of mapAndSeq and fmap is more efficient
 
-instance (Control.Functor m, SeqElement m) => Capturing (StateT s m) where
-  applicativeOrControl = Right Dict -- the `AffineApplicative` for `StateT s m` requires `Control.Monad m`, so even if `applicativeOrControl @m` is `Left`, using `Right` for `StateT s m` leads to the least stringent constraints.
+instance SeqElement m => Capturing (Control.StateT s m) where
+  seqElementOrAltAffine = Left Dict -- Control.StateT is also Alt, but that requires a Consumable s, so the SeqElement option is less stringent
 
 instance Capturing ((,) a) where
-  applicativeOrControl = Right Dict
+  seqElementOrAltAffine = Left Dict
 
 instance
-  ( AffineApplicative m
+  ( Monad m
+  , Alt m
+  , AffineFunctor m
   , Consumable e
-  , Pointed m
-  , SeqElement m
   )
   => Capturing (ExceptT e m)
   where
-  applicativeOrControl = Left Dict
-
-preserving
-  :: forall h f g xs ys a
-   . Capturing h
-  => (forall x. Witness x %1 -> f x :@@: xs -> h (RestrictingSome g ys))
-  -> f a :@@: xs
-  -> h (g a :@@: ys)
-preserving f x = f @a Witness x `seqAndMap` \(RestrictingSome Witness y) -> (unsafeCoerce y, Just ())
-
-expose
-  :: forall x h f g xs ys
-   . (Capturing h, Functor h)
-  => (RestrictingSome f xs %1 -> h (RestrictingSome g ys)) -> f x :@@: xs -> h (g x :@@: ys)
-expose f = preserving @_ @f @g @xs @ys @x $ \w x -> f (RestrictingSome w x)
+  seqElementOrAltAffine = Right Dict
 
 hide
   :: forall h f g xs ys
-   . (Capturing h, Functor h)
-  => (forall x. f x :@@: xs -> h (g x :@@: ys))
-  -> RestrictingSome f xs
-  %1 -> h (RestrictingSome g ys)
-hide f (RestrictingSome @x w x) =
-  let
-    hy = Ur <$> f @x x
-  in
-    case applicativeOrControl @h of
-      Left Dict -> aLiftA2 (\w' (Ur y) -> RestrictingSome w' y) (point w) hy
-      Right Dict -> Control.fmap (\(Ur y) -> RestrictingSome w y) hy
+   . (Capturing h, NL.Functor h)
+  => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
+hide f (Some @x x) = Some @x NL.<$> f @x x
 
-instance Consumable (Witness x) where
-  consume Witness = ()
+expose
+  :: forall x h f g xs ys
+   . Capturing h
+  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+expose f x = case seqElementOrAltAffine @h of
+  Left Dict -> f (Some @x x) `seqAndMap` \(Some y) -> (unsafeCoerce y, Just ())
+  Right Dict -> f (Some @x x) <&> \(Some y) -> unsafeCoerce y
 
-instance Consumable (RestrictingSome f xs) where
-  consume (RestrictingSome w _) = consume w
-
+-- hide f (Some @x w x) =
+--   let
+--     hy = Ur <$> f @x x
+--   in
+--     case seqElementOrAlt @h of
+--       Left Dict -> aLiftA2 (\w' (Ur y) -> Some w' y) (point w) hy
+--       Right Dict -> Control.fmap (\(Ur y) -> Some w y) hy
 {- [markdown]
-The function `expose` exposes the existential type hidden in `RestrictingSome`, while `hide` hides a type in `RestrictingSome`.
+
 Now we can move on to the optics bit.
 -}
 
@@ -824,23 +743,23 @@ vecToList :: Vec n a -> [a]
 vecToList VNil = []
 vecToList (VCons a as) = a : vecToList as
 
-instance Functor (Vec n) where
+instance NL.Functor (Vec n) where
   fmap _ VNil = VNil
-  fmap f (VCons a as) = VCons (f a) (fmap f as)
+  fmap f (VCons a as) = VCons (f a) (NL.fmap f as)
 
 -- Like `LensLike`, but it preserves the hidden index in the foci.
 type PreservingLensLike h s t f xs g ys =
   Capturing h
-  => Lens.Over (FUN One) h s t (RestrictingSome f xs) (RestrictingSome g ys) -- = (RestrictingSome f xs %1 -> h (RestrictingSome g ys)) -> s -> h t
+  => Lens.Over (FUN One) h s t (Some f xs) (Some g ys) -- = (Some f xs %1 -> h (Some g ys)) -> s -> h t
 
 partsOf
-  :: (Capturing f, Functor f, Capturing f)
+  :: (Capturing f, NL.Functor f)
   => Lens.Traversing (->) f s t a b -> PreservingLensLike f s t Vec (LoT1 a) Vec (LoT1 b)
 partsOf o f s =
   lazyVecFromList (ins b) -- Surprise! We actually need `lazyVecFromList2` to make `partsOf` lazy.
     & \(SomeVec @n v) ->
       -- `unsafeOuts` should be safe because `f` preserves the length of the vector.
-      unsafeOuts b . vecToList <$> expose @n f v
+      unsafeOuts b . vecToList NL.<$> expose @n f v
  where
   b = o Lens.sell s
   ins = Lens.toListOf (Lens.getting Lens.bazaar)
@@ -848,8 +767,8 @@ partsOf o f s =
 
 pTraverseOf
   :: forall xs ys h f g s t
-   . (Applicative h, Capturing h)
-  => (forall m. (Applicative m, Capturing m, Capturing m) => PreservingLensLike m s t f xs g ys)
+   . (Applicative h, Capturing h, NL.Functor h)
+  => (forall m. (Applicative m, Capturing m, NL.Functor m) => PreservingLensLike m s t f xs g ys)
   -> (forall x. f x :@@: xs -> h (g x :@@: ys))
   -> s
   -> h t
@@ -861,7 +780,7 @@ demo1 =
   runIdentity $
     pTraverseOf
       (partsOf (Lens.traversed . Lens._Right))
-      (\chars -> Identity $ fmap (NL.const $ vecToList chars) chars)
+      (\chars -> Identity $ NL.fmap (NL.const $ vecToList chars) chars)
       [Left True, Right 'h', Left False, Right 'i']
 
 -- >>> demo1
@@ -883,24 +802,24 @@ I need it for something I plan to write an article about later™.
 Something else worth noting about the code block above is that we can actually define `PreservingLensLike` using an existing type from `lens`.
 Some optic combinators already abstract in the profunctor in the optics transformation, so combinators like [`taking`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:taking) and [`failing`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:failing) should also work with "preserving" optics.
 
-Speaking of standard optics, wouldn't it be nice if we could use them on `RestrictingSome` and compose them with preserving optics?
+Speaking of standard optics, wouldn't it be nice if we could use them on `Some` and compose them with preserving optics?
 -}
 
 type instance Lens.Index (Vec n a) = Int
 type instance Lens.IxValue (Vec n a) = a
 
 instance Lens.Ixed (Vec n a) where
-  ix 0 f (VCons a as) = flip VCons as <$> f a
-  ix i f (VCons a as) = VCons a <$> Lens.ix (pred i) f as
+  ix 0 f (VCons a as) = flip VCons as NL.<$> f a
+  ix i f (VCons a as) = VCons a NL.<$> Lens.ix (pred i) f as
   ix _ _ VNil = error "a proper `ix` for vectors would use some integral type with a type-level upper bound"
 
 hidden
   :: forall f s t xs ys a b
-   . (Capturing f, Functor f)
+   . (Capturing f, NL.Functor f)
   => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
   -> (a -> f b)
-  -> RestrictingSome s xs
-  %1 -> f (RestrictingSome t ys)
+  -> Some s xs
+  %1 -> f (Some t ys)
 hidden o f = hide $ \ @n -> o @n f
 
 demo2 :: [Either Bool Char]
@@ -916,26 +835,31 @@ main = print demo2
 -- prints [Left True,Right 'h',Left False,Right 'I']
 -- notice how the "i" at the end is now capitalized
 {- [markdown]
-As shown we can run standard optics like `Lens.ix` on `RestrictingSome` foci using the `hidden` combinator.
+As shown we can run standard optics like `Lens.ix` on `Some` foci using the `hidden` combinator.
 And while the example does not show it, you can see from the type of hidden that we could precompose it with standard optics (like `hidden (...) . standardOptic`), because the arrow in `(a -> f b)` in `hidden`'s type is not linear.
 
 Finally, I'd also like to show how to define `Getter`s for preserving optics, because this was not possible with some of my failed ideas for preserving optics.
 -}
 
-data Some f xs where
-  Some :: forall x f xs. f x :@@: xs -> Some f xs
+data UnrestrictedSome f xs where
+  UnrestrictedSome :: forall x f xs. f x :@@: xs -> UnrestrictedSome f xs
 
 type PreservingLensLike' h s f xs = PreservingLensLike h s s f xs f xs
 
 type PreservingGetter r s f xs = PreservingLensLike' ((,) r) s f xs
 
-pView :: Dupable (Some f xs) => PreservingGetter (Some f xs) s f xs -> s -> Some f xs
-pView o s = NL.fst $ o (hide (\ @x x -> (Some @x x, x))) s
+pView :: PreservingGetter (UnrestrictedSome f xs) s f xs -> s -> UnrestrictedSome f xs
+pView o s = NL.fst $ o (hide (\ @x x -> (UnrestrictedSome @x x, x))) s
 
 {- [markdown]
 ## Wrapping up
 
-The purpose of this article is put these ideas out there and see if someone sees any safety issues that I have overlooked.
+The purpose of this article is to put these ideas out there and see if someone sees any safety issues that I have overlooked.
+Additionally, I think it would be interesting to hear the perspective from something with a more theoretical background on this.
+Is there a theoretical connection between linear types and existential types?
+Is there a type system with a kind of quantification that would allow the types now hidden in `Some` in optics to be visible?
+I think it would be very interesting to answer these questions.
+
 As I mentioned in the introduction, you can play with the code in your browser using a [GitHub Codespace](https://codespaces.new/cdfa/existentials-on-a-leash?quickstart=1).
 If you find something, please create an issue [on GitHub](https://github.com/cdfa/existentials-on-a-leash/issues).
 
