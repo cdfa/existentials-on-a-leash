@@ -112,6 +112,7 @@ infixr 9 .
 (<&>) :: Functor f => f a %1 -> (a %1 -> b) -> f b
 (<&>) = flip (<$>)
 
+main = print demo2
 ```
 
 </details>
