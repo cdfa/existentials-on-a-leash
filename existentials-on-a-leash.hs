@@ -61,12 +61,12 @@ I also define my own `.` because the version from `linear-base` is not as polymo
 ghc-options: -Wall
 default-language: GHC2024
 build-depends:
- base,
- linear-base,
- lens,
- mtl,
- profunctors,
- kind-apply,
+  base,
+  linear-base,
+  lens,
+  mtl,
+  profunctors,
+  kind-apply,
 -}
 {- project:
 with-compiler: ghc-9.12.3
@@ -123,16 +123,16 @@ Now we can define our vectors and `vecFromList`:
 data Nat = Zero | Succ Nat
 
 data Vec n a where
- VNil :: Vec Zero a
- VCons :: a %1 -> Vec n a %1 -> Vec (Succ n) a
+  VNil :: Vec Zero a
+  VCons :: a %1 -> Vec n a %1 -> Vec (Succ n) a
 
 data SomeVec a where
- SomeVec :: forall n a. Vec n a %1 -> SomeVec a
+  SomeVec :: forall n a. Vec n a %1 -> SomeVec a
 
 vecFromList :: [a] -> SomeVec a
 vecFromList [] = SomeVec VNil
 vecFromList (a : as) =
- vecFromList as & \(SomeVec aVec) -> SomeVec $ VCons a aVec
+  vecFromList as & \(SomeVec aVec) -> SomeVec $ VCons a aVec
 {- [markdown]
 If you've never seen the `%1` used the definition for `VCons`, you can ignore them for now.
 This marks the fields of the constructor as linear, which will be explained more later.
@@ -213,37 +213,37 @@ The following example shows how this can be used to generate incorrect type equa
 -}
 
 data GADT a where
- Int :: GADT Int
- Char :: GADT Char
+  Int :: GADT Int
+  Char :: GADT Char
 
 data Wrapper where
- Wrapper :: forall a. (Bool -> GADT a) %1 -> Wrapper
+  Wrapper :: forall a. (Bool -> GADT a) %1 -> Wrapper
 
 wrapper :: Wrapper
 wrapper =
- unpack2
-   ( \(fresh :: Fresh a) ->
-       Wrapper @a
-         (\b -> if b then pack @Int Int fresh else pack @Char Char fresh)
-   )
+  unpack2
+    ( \(fresh :: Fresh a) ->
+        Wrapper @a
+          (\b -> if b then pack @Int Int fresh else pack @Char Char fresh)
+    )
 
 {- [markdown]
 
 ```haskell
 conflict :: Int :~: Char
 conflict =
- wrapper & \(Wrapper @a (f :: Bool -> GADT a)) ->
-   let
-     int = f True :: GADT a
-     char = f False :: GADT a
-   in
-     trans @Int @a @Char -- trans :: (a :~: b) -> (b :~: c) -> a :~: c
-       ( case int of
-           Int -> Refl :: Int :~: a
-       )
-       ( case char of
-           Char -> Refl :: a :~: Char
-       )
+  wrapper & \(Wrapper @a (f :: Bool -> GADT a)) ->
+    let
+      int = f True :: GADT a
+      char = f False :: GADT a
+    in
+      trans @Int @a @Char -- trans :: (a :~: b) -> (b :~: c) -> a :~: c
+        ( case int of
+            Int -> Refl :: Int :~: a
+        )
+        ( case char of
+            Char -> Refl :: a :~: Char
+        )
 ```
 
 In essence, the `Fresh`-value escapes its linear scope through `Wrapper`.
@@ -285,12 +285,12 @@ Now let's continue and finally define a lazy `vecFromList`:
 lazyVecFromList0 :: Dupable a => [a] %m -> Exists n (Vec n a)
 lazyVecFromList0 [] n = pack @Zero VNil n
 lazyVecFromList0 (a : as) n =
- -- This `unpack` actually unpacks the `Vec` produced by the recursive call, not the one `pack`ed immediately below
- unpack
-   -- TypeAbstractions syntax
-   ( \ @predN predN ->
-       pack @(Succ predN) (VCons a L.$ lazyVecFromList0 as predN) n
-   )
+  -- This `unpack` actually unpacks the `Vec` produced by the recursive call, not the one `pack`ed immediately below
+  unpack
+    -- TypeAbstractions syntax
+    ( \ @predN predN ->
+        pack @(Succ predN) (VCons a L.$ lazyVecFromList0 as predN) n
+    )
 
 {- [markdown]
 The manual `pack`ing and `unpack`ing adds significant verbosity, but I believe each use is necessary.
@@ -323,9 +323,9 @@ Anyway, here's the test:
 
 lazyVecFromListIsLazy :: Maybe Int
 lazyVecFromListIsLazy =
- unpack (SomeVec . lazyVecFromList1 (0 : error "second element evaluated")) & \case
-   (SomeVec (VCons a _)) -> Just a
-   _ -> Nothing
+  unpack (SomeVec . lazyVecFromList1 (0 : error "second element evaluated")) & \case
+    (SomeVec (VCons a _)) -> Just a
+    _ -> Nothing
 
 -- >>> lazyVecFromListIsLazy
 -- Just 0
@@ -338,21 +338,21 @@ Nothing special going on here. They just have to be written out manually because
 -}
 
 instance Consumable a => Consumable (Vec n a) where
- consume VNil = ()
- consume (VCons x xs) = lseq x L.$ consume xs
+  consume VNil = ()
+  consume (VCons x xs) = lseq x L.$ consume xs
 
 instance Dupable a => Dupable (Vec n a) where
- dupR VNil = pure VNil
- dupR (VCons x xs) = VCons <$> dupR x <*> dupR xs
+  dupR VNil = pure VNil
+  dupR (VCons x xs) = VCons <$> dupR x <*> dupR xs
 
 instance Consumable a => Consumable (SomeVec a) where
- consume (SomeVec v) = consume v
+  consume (SomeVec v) = consume v
 
 instance Dupable a => Dupable (SomeVec a) where
- dupR (SomeVec v) = SomeVec <$> dupR v
+  dupR (SomeVec v) = SomeVec <$> dupR v
 
 instance Consumable (Fresh a) where
- consume (Fresh Refl) = ()
+  consume (Fresh Refl) = ()
 
 deriving instance Show a => Show (Vec n a)
 deriving instance Show a => Show (SomeVec a)
@@ -374,7 +374,7 @@ This operator gets some special treatment during type checking, but when `pack`/
 -}
 
 data (/\) c a where
- SuchThat :: c => a %1 -> c /\ a
+  SuchThat :: c => a %1 -> c /\ a
 
 infix 3 `SuchThat`
 type SuchThat a c = c /\ a
@@ -388,18 +388,18 @@ vecUncons (VCons a as) = (a, as)
 
 demo0 :: Maybe (Integer, SomeVec Integer)
 demo0 =
- unpack
-   ( \n ->
-       unpack
-         ( \m ->
-             let
-               !(v1, v2) = dup L.$ lazyVecFromList1 [0 .. 3] n
-             in
-               case vecNonEmpty v1 m of
-                 Just (SuchThat v3) -> lseq v3 L.$ Just L.$ second SomeVec L.$ vecUncons v2 -- we can use v2 here since we have `n ~ Succ m` from `vecNonEmpty`!
-                 Nothing -> lseq v2 Nothing
-         )
-   )
+  unpack
+    ( \n ->
+        unpack
+          ( \m ->
+              let
+                !(v1, v2) = dup L.$ lazyVecFromList1 [0 .. 3] n
+              in
+                case vecNonEmpty v1 m of
+                  Just (SuchThat v3) -> lseq v3 L.$ Just L.$ second SomeVec L.$ vecUncons v2 -- we can use v2 here since we have `n ~ Succ m` from `vecNonEmpty`!
+                  Nothing -> lseq v2 Nothing
+          )
+    )
 
 -- >>> demo0
 -- Just (0,SomeVec (VCons 1 (VCons 2 (VCons 3 VNil))))
@@ -407,11 +407,11 @@ demo0 =
 This demo is a bit contrived because I wanted to use the `n ~ Succ m` explicitly and linear types force the explicit duplication and consumption of values, but I think the point should be clear: no explicit type annotations outside those of functions signatures were needed to make GHC resolve all constraints correctly!
 
 While that "inconvenience" of duping/consuming is by design, there are also still many unintentional difficulties with working with linear types:
- * Multiplicity inference is not enabled by default. This means that most existing Haskell code is unusable, even if the implementation of a function is actually linear.
- * The error messages don't say where a value is used non-linearly, only which variable.
- * Even if a function only captures `Consumable` or `Dupable` values in it's closure, it's not `Consumable` or `Dupable`.
- * Linear pattern synonyms are not supported yet.
- * All the other limitations mentioned in the [docs](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/linear_types.html#limitations).
+  * Multiplicity inference is not enabled by default. This means that most existing Haskell code is unusable, even if the implementation of a function is actually linear.
+  * The error messages don't say where a value is used non-linearly, only which variable.
+  * Even if a function only captures `Consumable` or `Dupable` values in it's closure, it's not `Consumable` or `Dupable`.
+  * Linear pattern synonyms are not supported yet.
+  * All the other limitations mentioned in the [docs](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/linear_types.html#limitations).
 
 So while this linear-existentiality-witness-techinique allows some things that are not possible with the existing existential-type-workarounds, I can't recommend using it outside of cases that are very limited in scope like `lazyVecFromList`.
 
@@ -420,8 +420,8 @@ Luckily, we can define a `lazyVecFromList` that hides all the linear-types compl
 
 lazyVecFromList :: [a] -> SomeVec a
 lazyVecFromList xs =
- unpack (SomeVec L.. lazyVecFromList1 (NL.fmap Ur xs))
-   & \(SomeVec vec) -> SomeVec $ NL.fmap (forget unur) vec
+  unpack (SomeVec L.. lazyVecFromList1 (NL.fmap Ur xs))
+    & \(SomeVec vec) -> SomeVec $ NL.fmap (forget unur) vec
 {- [markdown]
 
 ## Invisible type preservation with linear functions
@@ -469,13 +469,13 @@ I think the solution that fits most use cases is to require that `h` is either a
 
 -- This Functor is the linear data Functor
 class Functor f => Alt f where
- (<!>) :: Consumable a => f a %1 -> f a %1 -> f a
+  (<!>) :: Consumable a => f a %1 -> f a %1 -> f a
 
 data Affine a where
- Affine :: a -> Affine a -- explicit non-linear constructor. Consider the constructor hidden
+  Affine :: a -> Affine a -- explicit non-linear constructor. Consider the constructor hidden
 
 instance Consumable (Affine a) where
- consume (Affine _) = ()
+  consume (Affine _) = ()
 
 affine :: a -> Affine a
 affine = Affine
@@ -487,7 +487,7 @@ liftAffine :: (a -> b) -> Affine a %1 -> Affine b
 liftAffine f (Affine a) = Affine L.$ f a
 
 class Functor f => AffineFunctor f where
- afmap :: Affine (a %1 -> b) %1 -> f a %1 -> f b
+  afmap :: Affine (a %1 -> b) %1 -> f a %1 -> f b
 
 {- [markdown]
 `Alt` makes `expose` safe while `AffineFunctor` makes `hide` safe.
@@ -517,17 +517,17 @@ We'll start with an `Alt`/`AffineFunctor`-based definitions of `hide` and `expos
 -}
 
 data Some f xs where
- Some :: forall x f xs. f x :@@: xs -> Some f xs -- consider the constructor hidden
+  Some :: forall x f xs. f x :@@: xs -> Some f xs -- consider the constructor hidden
 
 hideAffineFunctor
- :: (AffineFunctor h, NL.Functor h)
- => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
+  :: (AffineFunctor h, NL.Functor h)
+  => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
 hideAffineFunctor f (Some @x x) = Some @x NL.<$> f @x x -- sadly we need to use a non-linear fmap here because `Some` is non-linear
 
 exposeAlt
- :: forall x h f g xs ys
-  . Alt h
- => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+  :: forall x h f g xs ys
+   . Alt h
+  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
 exposeAlt f x = f (Some @x x) <&> \(Some y) -> unsafeCoerce y
 {- [markdown]
 
@@ -536,42 +536,42 @@ exposeAlt f x = f (Some @x x) <&> \(Some y) -> unsafeCoerce y
 
 -}
 instance Alt Identity where
- (<!>) = flip lseq
+  (<!>) = flip lseq
 
 instance Consumable a => Consumable (Identity a) where
- consume (Identity a) = consume a
+  consume (Identity a) = consume a
 
 instance (Alt m, Consumable s) => Alt (NL.StateT s m) where
- NL.StateT f <!> NL.StateT g = NL.StateT L.$ \s -> f s <!> g s
+  NL.StateT f <!> NL.StateT g = NL.StateT L.$ \s -> f s <!> g s
 
 instance Functor m => Functor (NL.StateT s m) where
- fmap f (NL.StateT t) = NL.StateT L.$ \s -> fmap (first f) L.$ t s
+  fmap f (NL.StateT t) = NL.StateT L.$ \s -> fmap (first f) L.$ t s
 
 instance Consumable e => Alt (Either e) where
- Left e1 <!> Left e2 = lseq e2 L.$ Left e1
- Left e1 <!> r = lseq e1 r
- Right a <!> r = lseq r L.$ Right a
+  Left e1 <!> Left e2 = lseq e2 L.$ Left e1
+  Left e1 <!> r = lseq e1 r
+  Right a <!> r = lseq r L.$ Right a
 
 instance (Monad m, Alt m, Consumable e) => Alt (ExceptT e m) where
- ExceptT m <!> ExceptT n =
-   ExceptT L.$ m >>= \case
-     Right a -> Control.pure (Right a) <!> n -- have to consume n with <!> due to linearity. Using lseq is to restrictive.
-     -- because of the case above, this instance only satisfies the left catch law when m satisfies the left catch law, and it only satisfies the left distribution law when m satisfies the left distribution law.
-     -- In turn, the case below must satisfy both laws and can not mappend the e to another e from n, like the `Alt ExceptT` instance in semigroupoids does.
-     Left e -> lseq e n
+  ExceptT m <!> ExceptT n =
+    ExceptT L.$ m >>= \case
+      Right a -> Control.pure (Right a) <!> n -- have to consume n with <!> due to linearity. Using lseq is to restrictive.
+      -- because of the case above, this instance only satisfies the left catch law when m satisfies the left catch law, and it only satisfies the left distribution law when m satisfies the left distribution law.
+      -- In turn, the case below must satisfy both laws and can not mappend the e to another e from n, like the `Alt ExceptT` instance in semigroupoids does.
+      Left e -> lseq e n
 
 instance AffineFunctor Identity where
- afmap f (Identity a) = Identity L.$ runAffine f a
+  afmap f (Identity a) = Identity L.$ runAffine f a
 
 instance AffineFunctor m => AffineFunctor (NL.StateT s m) where
- afmap f (NL.StateT t) = NL.StateT L.$ \s -> afmap (liftAffine first f) L.$ t s
+  afmap f (NL.StateT t) = NL.StateT L.$ \s -> afmap (liftAffine first f) L.$ t s
 
 instance AffineFunctor (Either e) where
- afmap f (Left e) = lseq f L.$ Left e
- afmap f (Right a) = Right L.$ runAffine f a
+  afmap f (Left e) = lseq f L.$ Left e
+  afmap f (Right a) = Right L.$ runAffine f a
 
 instance AffineFunctor m => AffineFunctor (ExceptT e m) where
- afmap f (ExceptT m) = ExceptT L.$ afmap (liftAffine fmap f) m
+  afmap f (ExceptT m) = ExceptT L.$ afmap (liftAffine fmap f) m
 
 {- [markdown]
 
@@ -583,20 +583,20 @@ Let me show why.
 -}
 
 exposeControlFunctor
- :: forall x h f g xs ys
-  . Control.Functor h
- => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+  :: forall x h f g xs ys
+   . Control.Functor h
+  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
 exposeControlFunctor f x = f (Some @x x) <&> \(Some y) -> unsafeCoerce y
 
 problem =
- NL.fst $
-   exposeControlFunctor @_ @((,) (Some Vec (LoT1 Int)))
-     (\s -> (s, error "The consequences of my actions"))
-     VNil
+  NL.fst $
+    exposeControlFunctor @_ @((,) (Some Vec (LoT1 Int)))
+      (\s -> (s, error "The consequences of my actions"))
+      VNil
 
 -- very specific simple Show instance for the purpose of this example
 instance Show a => Show (Some Vec (LoT1 a)) where
- show (Some x) = "Some (" <> show x <> ")"
+  show (Some x) = "Some (" <> show x <> ")"
 
 -- >>> problem
 -- Some (VNil)
@@ -616,22 +616,22 @@ It must be "a part of `a`", because if we implement this for `StateT s m`, we ne
 We'll accomplish this with a new class called `SeqElement` (name is subject to change):
 -}
 class Control.Functor f => SeqElement f where
- mapAndSeq :: Consumable c => (a %1 -> (b, c)) %1 -> f a %1 -> f b
+  mapAndSeq :: Consumable c => (a %1 -> (b, c)) %1 -> f a %1 -> f b
 
 {- [markdown]
 Let't check that we can define instances for `SeqElement` for some common functors.
 -}
 
 instance SeqElement Identity where
- mapAndSeq extract (Identity a) = extract a & \(b, c) -> lseq c L.$ Identity b
+  mapAndSeq extract (Identity a) = extract a & \(b, c) -> lseq c L.$ Identity b
 
 instance SeqElement m => SeqElement (StateT s m) where
- mapAndSeq extract (StateT f) = StateT L.$ \s -> mapAndSeq extract' L.$ f s
-  where
-   extract' (a, s) = extract a & \(b, c) -> ((b, s), c)
+  mapAndSeq extract (StateT f) = StateT L.$ \s -> mapAndSeq extract' L.$ f s
+   where
+    extract' (a, s) = extract a & \(b, c) -> ((b, s), c)
 
 instance SeqElement ((,) a) where
- mapAndSeq extract (a, b) = extract b & \(d, c) -> lseq c (a, d)
+  mapAndSeq extract (a, b) = extract b & \(d, c) -> lseq c (a, d)
 
 {- [markdown]
 So far, so good!
@@ -639,23 +639,23 @@ Now let's check that this solves our `problem`.
 -}
 
 hideSeqElement
- :: (SeqElement h, NL.Functor h) => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
+  :: (SeqElement h, NL.Functor h) => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
 hideSeqElement f (Some @x x) = Some @x NL.<$> f @x x
 
 seqAndMap :: (SeqElement f, Consumable c) => f a %1 -> (a %1 -> (b, c)) %1 -> f b
 seqAndMap = flip mapAndSeq
 
 exposeSeqElement
- :: forall x h f g xs ys
-  . SeqElement h
- => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+  :: forall x h f g xs ys
+   . SeqElement h
+  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
 exposeSeqElement f x = f (Some @x x) `seqAndMap` \(Some y) -> (unsafeCoerce y, ())
 
 problemSolved =
- NL.fst $
-   exposeSeqElement @_ @((,) (Some Vec (LoT1 Int)))
-     (\s -> (s, error "The consequences of my actions"))
-     VNil
+  NL.fst $
+    exposeSeqElement @_ @((,) (Some Vec (LoT1 Int)))
+      (\s -> (s, error "The consequences of my actions"))
+      VNil
 
 -- >>> problemSolved
 -- The consequences of my actions
@@ -668,43 +668,43 @@ We'll define a class `Capturing` that requires a functor to be either an instanc
 -}
 
 data Dict :: Constraint -> Type where
- Dict :: a => Dict a
+  Dict :: a => Dict a
 
 class Capturing f where
- seqElementOrAltAffine :: Either (Dict (SeqElement f)) (Dict (Alt f, AffineFunctor f))
+  seqElementOrAltAffine :: Either (Dict (SeqElement f)) (Dict (Alt f, AffineFunctor f))
 
 instance Capturing Identity where
- seqElementOrAltAffine = Right Dict -- we pick the Alt option, because expose will use fmap instead of mapAndSeq and fmap is more efficient
+  seqElementOrAltAffine = Right Dict -- we pick the Alt option, because expose will use fmap instead of mapAndSeq and fmap is more efficient
 
 instance SeqElement m => Capturing (Control.StateT s m) where
- seqElementOrAltAffine = Left Dict -- Control.StateT is also Alt, but that requires a Consumable s, so the SeqElement option is less stringent
+  seqElementOrAltAffine = Left Dict -- Control.StateT is also Alt, but that requires a Consumable s, so the SeqElement option is less stringent
 
 instance Capturing ((,) a) where
- seqElementOrAltAffine = Left Dict
+  seqElementOrAltAffine = Left Dict
 
 instance
- ( Monad m
- , Alt m
- , AffineFunctor m
- , Consumable e
- )
- => Capturing (ExceptT e m)
- where
- seqElementOrAltAffine = Right Dict
+  ( Monad m
+  , Alt m
+  , AffineFunctor m
+  , Consumable e
+  )
+  => Capturing (ExceptT e m)
+  where
+  seqElementOrAltAffine = Right Dict
 
 hide
- :: forall h f g xs ys
-  . (Capturing h, NL.Functor h)
- => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
+  :: forall h f g xs ys
+   . (Capturing h, NL.Functor h)
+  => (forall x. f x :@@: xs -> h (g x :@@: ys)) -> Some f xs %1 -> h (Some g ys)
 hide f (Some @x x) = Some @x NL.<$> f @x x
 
 expose
- :: forall x h f g xs ys
-  . Capturing h
- => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
+  :: forall x h f g xs ys
+   . Capturing h
+  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs -> h (g x :@@: ys)
 expose f x = case seqElementOrAltAffine @h of
- Left Dict -> f (Some @x x) `seqAndMap` \(Some y) -> (unsafeCoerce y, Just ())
- Right Dict -> f (Some @x x) <&> \(Some y) -> unsafeCoerce y
+  Left Dict -> f (Some @x x) `seqAndMap` \(Some y) -> (unsafeCoerce y, Just ())
+  Right Dict -> f (Some @x x) <&> \(Some y) -> unsafeCoerce y
 {- [markdown]
 
 Now we can move on to the optics bit.
@@ -715,44 +715,44 @@ vecToList VNil = []
 vecToList (VCons a as) = a : vecToList as
 
 instance NL.Functor (Vec n) where
- fmap _ VNil = VNil
- fmap f (VCons a as) = VCons (f a) (NL.fmap f as)
+  fmap _ VNil = VNil
+  fmap f (VCons a as) = VCons (f a) (NL.fmap f as)
 
 -- Like `LensLike`, but it preserves the hidden index in the foci.
 type PreservingLensLike h s t f xs g ys =
- Capturing h
- => Lens.Over (FUN One) h s t (Some f xs) (Some g ys) -- = (Some f xs %1 -> h (Some g ys)) -> s -> h t
+  Capturing h
+  => Lens.Over (FUN One) h s t (Some f xs) (Some g ys) -- = (Some f xs %1 -> h (Some g ys)) -> s -> h t
 
 partsOf
- :: (Capturing f, NL.Functor f)
- => Lens.Traversing (->) f s t a b -> PreservingLensLike f s t Vec (LoT1 a) Vec (LoT1 b)
+  :: (Capturing f, NL.Functor f)
+  => Lens.Traversing (->) f s t a b -> PreservingLensLike f s t Vec (LoT1 a) Vec (LoT1 b)
 partsOf o f s =
- lazyVecFromList (ins b) -- Surprise! We actually need `lazyVecFromList2` to make `partsOf` lazy.
-   & \(SomeVec @n v) ->
-     -- `unsafeOuts` should be safe because `f` preserves the length of the vector.
-     unsafeOuts b . vecToList NL.<$> expose @n f v
-  where
-    b = o Lens.sell s
-    ins = Lens.toListOf (Lens.getting Lens.bazaar)
-    unsafeOuts = NL.evalState `Lens.rmap` Lens.bazaar (Lens.cotabulate (\_ -> NL.state (fromJust . NL.uncons)))
+  lazyVecFromList (ins b) -- Surprise! We actually need `lazyVecFromList2` to make `partsOf` lazy.
+    & \(SomeVec @n v) ->
+      -- `unsafeOuts` should be safe because `f` preserves the length of the vector.
+      unsafeOuts b . vecToList NL.<$> expose @n f v
+   where
+     b = o Lens.sell s
+     ins = Lens.toListOf (Lens.getting Lens.bazaar)
+     unsafeOuts = NL.evalState `Lens.rmap` Lens.bazaar (Lens.cotabulate (\_ -> NL.state (fromJust . NL.uncons)))
 
 pTraverseOf
- :: forall xs ys h f g s t
-  . (Applicative h, Capturing h, NL.Functor h)
- => PreservingLensLike h s t f xs g ys
- -> (forall x. f x :@@: xs -> h (g x :@@: ys))
- -> s
- -> h t
+  :: forall xs ys h f g s t
+   . (Applicative h, Capturing h, NL.Functor h)
+  => PreservingLensLike h s t f xs g ys
+  -> (forall x. f x :@@: xs -> h (g x :@@: ys))
+  -> s
+  -> h t
 pTraverseOf o f = o $ hide $ \ @n -> f @n
 
 -- This replaces all the `Char`s in a `[Either Bool Char]` with a `String` consisting of all the `Char`s in the list.
 demo1 :: [Either Bool String]
 demo1 =
- runIdentity $
-   pTraverseOf
-     (partsOf (Lens.traversed . Lens._Right))
-     (\chars -> Identity $ NL.fmap (NL.const $ vecToList chars) chars)
-     [Left True, Right 'h', Left False, Right 'i']
+  runIdentity $
+    pTraverseOf
+      (partsOf (Lens.traversed . Lens._Right))
+      (\chars -> Identity $ NL.fmap (NL.const $ vecToList chars) chars)
+      [Left True, Right 'h', Left False, Right 'i']
 
 -- >>> demo1
 -- [Left True,Right "hi",Left False,Right "hi"]
@@ -778,26 +778,26 @@ type instance Lens.Index (Vec n a) = Int
 type instance Lens.IxValue (Vec n a) = a
 
 instance Lens.Ixed (Vec n a) where
- ix 0 f (VCons a as) = flip VCons as NL.<$> f a
- ix i f (VCons a as) = VCons a NL.<$> Lens.ix (pred i) f as
- ix _ _ VNil = error "a proper `ix` for vectors would use some integral type with a type-level upper bound"
+  ix 0 f (VCons a as) = flip VCons as NL.<$> f a
+  ix i f (VCons a as) = VCons a NL.<$> Lens.ix (pred i) f as
+  ix _ _ VNil = error "a proper `ix` for vectors would use some integral type with a type-level upper bound"
 
 hidden
- :: forall f s t xs ys a b
-  . (Capturing f, NL.Functor f)
- => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
- -> (a -> f b)
- -> Some s xs
- %1 -> f (Some t ys)
+  :: forall f s t xs ys a b
+   . (Capturing f, NL.Functor f)
+  => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
+  -> (a -> f b)
+  -> Some s xs
+  %1 -> f (Some t ys)
 hidden o f = hide $ \ @n -> o @n f
 
 demo2 :: [Either Bool Char]
 demo2 =
- runIdentity $
-   Lens.traverseOf
-     (partsOf (Lens.traversed . Lens._Right) . hidden (Lens.ix 1))
-     (Identity . toUpper)
-     [Left True, Right 'h', Left False, Right 'i']
+  runIdentity $
+    Lens.traverseOf
+      (partsOf (Lens.traversed . Lens._Right) . hidden (Lens.ix 1))
+      (Identity . toUpper)
+      [Left True, Right 'h', Left False, Right 'i']
 
 -- >>> demo2
 -- [Left True,Right 'h',Left False,Right 'I']
@@ -810,7 +810,7 @@ Finally, I'd also like to show how to define `Getter`s for preserving optics, be
 -}
 
 data UnrestrictedSome f xs where
- UnrestrictedSome :: forall x f xs. f x :@@: xs %1 -> UnrestrictedSome f xs
+  UnrestrictedSome :: forall x f xs. f x :@@: xs %1 -> UnrestrictedSome f xs
 
 type PreservingLensLike' h s f xs = PreservingLensLike h s s f xs f xs
 
