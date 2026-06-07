@@ -431,20 +431,20 @@ lazyVecFromList xs =
 *I discovered the technique above almost 2 years ago.*
 
 I put it on GitHub, but never mentioned it because I had not yet succeeded in my actual goal: to make a safe version of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
-The hard thing about this is that to enable it to change the types of the foci of the argument `Traversable` (from `a` to `b`), we need to ensure that the foci-transformation function is parameterized over the length of the list and also preserves that length.
+The hard thing about this is that to enable it to change the types of the foci of the argument traversal (from `a` to `b`), we need to ensure that `[a]` and `[b]` have the same length.
 Because I wanted the optic to be compatible with the existing `lens` ecosystem, a rank-2-type or GADT-wrapper wouldn't work.
-I thought I could use the linear-existentiality-witness-techinique , but when I tried it in `partsOf :: Functor f => Traversing (->) f s t a b -> Fresh n %1 -> LensLike f s t (Vec n a) (Vec n b)`, the fact that the resulting optic must be used linearly, makes it just as incompatible with `lens` as the rank-2-type version.
+I thought I could use the linear-existentiality-witness-technique, but when I tried it in `partsOf :: Functor f => Traversing (->) f s t a b -> Fresh n %1 -> LensLike f s t (Vec n a) (Vec n b)`, the fact that the resulting optic must be used linearly, makes it just as incompatible with `lens` as the rank-2-type version.
 
 To be clear, if you unfold the `LensLike f s t (Vec n a) (Vec n b)` to `(forall n. Vec n a -> f (Vec n b)) -> s -> f t` (i.e. use a rank-2-type), you can implement `partsOf` just fine, but this optic can't be used in functions like `traverseOf` or pre-composed with other optics with `.`, because the `forall n` messes with type inference.
 For a long time, I banged my head against the wall trying to think of a way to make a type-changing `partsOf` that would be compatible with the rest of `lens`, and so the project stayed on my list of things to get back to at some point.
-It's somewhat regrettable that I didn't just publish the first part of this article anyway, but on the other hand I found quite a few serious mistakes when I came back to it, so I'm also happy I caught those before publishing.
+It's somewhat regrettable that I didn't just publish the first part of this article anyway, but on the other hand, I found quite a few serious mistakes when I came back to it, so I'm also happy I caught those before publishing.
 
 I now think making a safe type-changing `partsOf` that is compatible with all the functions from `lens` is impossible, but I did find a way to solve the `.`-pre-composition issue, again using linear functions.
 The rest of this section is dedicated to this technique.
 
 First, we have to wrap the focus in a type like `data Some f = forall x. Some (f x)`.
 This relieves us from having to quantify `n` existentially thus making it into a normal `lens` optic.
-Then, if a function `fun` producing a `Some`-value, can only do so by returning a `Some`-value that it received as an argument, we can infer that the `x` inside the produced value must be the same as the one the function was applied to.
+Then, if a function `fun` that produces a `Some`-value, can only do so by returning a `Some`-value that it received as an argument, we can infer that the `x` inside the produced `Some` must be the same as the `x` in the `Some` the function was applied to.
 Written out in code, we would have `expose :: (Some f -> Some g) -> f x -> g x` defined as `expose f x = f (Some x) & \(Some y) -> unsafeCoerce y`, with some constraints on `(Some f -> Some g)` to ensure it has to return the value given as an argument.
 
 Obviously, the `Some` constructor needs to be hidden, but we also need to prevent `Some`-values from being reused or swapped with `Some`-value with a different origin.
