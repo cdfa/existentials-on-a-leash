@@ -4,6 +4,7 @@
         "fmap",
         "forall",
         "gxys",
+        "kleisli",
         "lseq",
         "Succ",
         "unur"
