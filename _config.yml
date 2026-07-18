@@ -5,7 +5,6 @@ plugins:
   - jekyll-titles-from-headings
 
 remote_theme: "jekyll/minima@4de3223"
-theme: minima
 
 minima:
   skin: dark
