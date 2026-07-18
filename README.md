@@ -1,9 +1,9 @@
 
 # Existentials on a leash
 
-In this article, I will share a new workaround for the limited nature of existential quantification in Haskell.
+In this article, I will share a new workaround for the limited nature of existential quantification in current Haskell.
 Specifically, I will show the implementation of an `Exists` quantifier that relieves us from having to wrap existential type variables with a GADT constructor or with a higher-rank function (CPS-style), and instead allows them to appear "naked" in types.
-The quantifier is implemented as a type synonym for a function that linearly consume a proof-token that ensures proper treatment of existentially typed values.
+The quantifier is implemented as a type synonym for a function that linearly consumes a proof-token that ensures proper treatment of existentially typed values.
 
 Additionally, I share an independent technique that ensures functions instantiate hidden ("non-naked") existential types in their result with the same type as its input type is instantiated, i.e. they preserve the instantiation of hidden type variables.
 This technique also relies on linear types, but not the existential quantifier mentioned before.
