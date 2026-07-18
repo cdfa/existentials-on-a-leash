@@ -1,11 +1,15 @@
 name: Existentials on a leash
-title: null
 
 plugins:
   - jekyll-remote-theme
+  - jekyll-titles-from-headings
 
 remote_theme: "jekyll/minima@1e8a445"
 theme: minima
 
 minima:
   skin: auto
+
+titles_from_headings:
+  enabled:     true
+  strip_title: false
