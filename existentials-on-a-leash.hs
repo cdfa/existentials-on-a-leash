@@ -1,11 +1,11 @@
 {- [markdown]
 # Existentials on a leash
 
-In this article, I will share a new workaround for the lack of existential quantification in Haskell.
-Specifically, I will show the implementation of an `Exists` quantifier that allows existential type variables to appear "naked" (without CPS-style/GADT wrapping) in types.
-The quantifier is implemented as a type synonym for functions that linearly consume a proof-token that ensures proper treatment of existentially typed values.
+In this article, I will share a new workaround for the limited nature of existential quantification in Haskell.
+Specifically, I will show the implementation of an `Exists` quantifier that relieves us from having to wrap existential type variables with a GADT constructor or with a higher-rank function (CPS-style), and instead allows them to appear "naked" in types.
+The quantifier is implemented as a type synonym for a function that linearly consume a proof-token that ensures proper treatment of existentially typed values.
 
-Additionally, I share an independent technique that ensures functions instantiate existential types in their result with the same type as its input type is instantiated, i.e. they preserve the instantiation of hidden type variables.
+Additionally, I share an independent technique that ensures functions instantiate hidden ("non-naked") existential types in their result with the same type as its input type is instantiated, i.e. they preserve the instantiation of hidden type variables.
 This technique also relies on linear types, but not the existential quantifier mentioned before.
 I will demonstrate this technique by implementing a safe variant of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
 
@@ -13,11 +13,11 @@ Both techniques use `unsafeCoerce`.
 I explain why I believe the coercions are safe, but I haven't proven anything formally.
 Please try to break this stuff if you see some hole I have missed.
 
-While I will briefly explain what existential types and linear types are, this article is not meant as a general introduction to these language features.
+While I will briefly explain what linear types are, this article is not meant as a general introduction to this concept.
 Familiarity with GADTs, linear types and optics (for the sections pertaining to those) is recommended.
 
 That being said, I made it as easy as I can for the reader to tinker with the code and interactively learn about these concepts by providing a [GitHub Codespace](https://codespaces.new/cdfa/existentials-on-a-leash?quickstart=1) prebuild (hint: use "Preview embedded markdown" to see the .hs file with its markdown version to the side).
-Clicking that link will allow you to tinker with the code with the support of the Haskell Language Server from a Visual Studio Code instance running in your browser (or from a container on your computer).
+Clicking that link will allow you to tinker with the code with the support of the Haskell Language Server without needing to install anything.
 It might even be a nice way to read the article because you can hover over variables and functions to see their types for example.
 
 ## Current limitations of existential types
@@ -29,18 +29,18 @@ As of GHC 9.14, GHC only supports 2 ways of "existentially quantifying" type var
 Both these techniques do not actually use existential quantification, but instead encode it through negated universal quantification.
 Wrapping and unwrapping existential types using these techniques is not just cumbersome, but they're also insufficient for defining optics with existentially quantified foci, such as prisms for constructors of GADTs with existentially quantified fields.
 
-[A proposal](https://github.com/goldfirere/ghc-proposals/blob/existentials/proposals/0473-existentials.rst) for adding first-class existential types to GHC was written a while ago, but the author seems to be prioritizing other work.
+[A GHC proposal](https://github.com/goldfirere/ghc-proposals/blob/existentials/proposals/0473-existentials.rst) for adding first-class existential types to GHC was written a while ago, but the author seems to be prioritizing other work.
 The proposal also shows a simple example of a function that is impossible to write using the current workarounds: a lazy `filter :: (a -> Bool) -> Vec n a -> exists m. Vec m a`.
 
 This article introduces 2 new (as far as I am aware) techniques.
-The first can be used to implement some of the motivating examples from the proposal.
+The first can be used to implement some of the motivating examples from the GHC proposal.
 However, instead a lazy `filter`, I demonstrate the capability for functions to lazily produce an existentially indexed type by defining a function `lazyVecFromList :: [a] -> Exists m (Vec m a)`.
 My initial reason for this was that when I started this project, I was using vectors from an external package which did not export its constructors, and to test a lazy `filter` I also needed a lazy way to create vectors.
 I didn't end up needing so many existing functions on vectors, so the article now defines its own vectors, but the example stayed.
 
 And since that first technique did not work so well for defining optics with existentially quantified types, I also demonstrate a second independent technique that makes such optics possible.
 
-But before we start looking at those workarounds, let's see why they are needed for a lazy `vecFromList`.
+But before we start looking at those workarounds, let's see why we can't write a lazy `vecFromList` without them.
 As mentioned before, we currently have to choose between using a rank-2-type and wrapping the vector in a GADT.
 We'll work out the second option, but first we need to enable some language extensions and import some stuff.
 I also define my own `.` because the version from `linear-base` is not as polymorphic as I'd like it to be.
@@ -157,7 +157,7 @@ GHC only offers universal quantification for such a type variable, but somehow, 
 To accomplish this, we start with a proxy type `Fresh` which can only be introduced with an existential type as parameter.
 
 -}
-data Fresh0 a = Fresh0
+data Fresh0 a = Fresh0 -- consider the constructor hidden
 
 unpack0 :: (forall a. Fresh0 a -> r) -> r
 unpack0 f = f Fresh0
@@ -177,7 +177,7 @@ This can be accomplished by providing a type equality witness (from `Data.Type.E
 We arrive at:
 -}
 
-newtype Fresh1 a = Fresh1 (forall b. a :~: b)
+newtype Fresh1 a = Fresh1 (forall b. a :~: b) -- consider the constructor hidden
 
 unpack1 :: (forall a. Fresh1 a -> r) -> r
 unpack1 f = f (Fresh1 $ unsafeCoerce Refl)
@@ -811,6 +811,7 @@ instance KnownNat Zero where
 instance KnownNat n => KnownNat (Succ n) where
   natSing = SSucc
 
+-- proof that when n and m are KnownNat, n `Plus` m is also KnownNat
 knownNatPlus :: forall n m. (KnownNat n, KnownNat m) => Dict (KnownNat (n `Plus` m))
 knownNatPlus = case natSing @n of
   SZero -> Dict
