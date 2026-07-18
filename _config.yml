@@ -1,5 +1,10 @@
 name: Existentials on a leash
 title: null
+
+plugins:
+  - jekyll-remote-theme
+
+remote_theme: "jekyll/minima@1e8a445"
 theme: minima
 
 minima:
