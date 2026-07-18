@@ -7,7 +7,7 @@ plugins:
 remote_theme: "jekyll/minima@4de3223"
 
 minima:
-  skin: dark
+  skin: auto
 
 titles_from_headings:
   enabled:     true
