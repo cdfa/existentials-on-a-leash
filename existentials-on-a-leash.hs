@@ -1,8 +1,6 @@
 {- [markdown]
 # Existentials on a leash
 
-> ⚠️⚠️⚠️ Note from after publishing: the second technique regarding the preservation of hidden type instantiations is actually not safe. I will see if I can fix that within reasonable time or otherwise remove that part from the article.
-
 In this article, I will share a new workaround for the limited nature of existential quantification in current Haskell.
 Specifically, I will show the implementation of an `Exists` quantifier that relieves us from having to wrap existential type variables with a GADT constructor or with a higher-rank function (CPS-style), and instead allows them to appear "naked" in types.
 The quantifier is implemented as a type synonym for a function that linearly consumes a proof-token that ensures proper treatment of existentially typed values.
@@ -78,7 +76,7 @@ index-state: 2026-03-18T08:38:52Z
 semaphore: True
 -}
 
-import Control.Functor.Linear (Monad (..), StateT (..))
+import Control.Functor.Linear (Monad (..))
 import Control.Functor.Linear qualified as Control
 import Control.Lens qualified as Lens
 import Control.Monad.Except
@@ -93,11 +91,10 @@ import Data.Kind
 import Data.Maybe
 import Data.PolyKinded hiding (Nat)
 import Data.Profunctor.Kleisli.Linear
-import Data.Tuple qualified as NL
 import Data.Type.Equality
 import Data.Unrestricted.Linear
-import Prelude.Linear hiding (forget, fst, ($), (.))
-import Prelude.Linear qualified as L
+import Prelude.Linear hiding (Any, any, forget, fst, ($), (.))
+import Prelude.Linear qualified as L hiding (Any, any)
 import Unsafe.Coerce (unsafeCoerce)
 import Unsafe.Linear qualified as Unsafe
 import Prelude (($))
@@ -431,8 +428,6 @@ lazyVecFromList xs =
 
 ## Invisible type preservation with linear functions
 
-> ⚠️⚠️⚠️ The next part is unsafe. Don't use it.
-
 *I discovered the technique above almost 2 years ago.*
 
 I put it on GitHub, but never mentioned it because I had not yet succeeded in my actual goal: to make a safe version of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
@@ -467,15 +462,7 @@ Without additional constraints, both `expose` and `hide` defined like this are u
 * if `h` is chosen to be something like `Const (Some f)`, `expose` could let a `Some`-value escape and be used non-linearly. We could apply our previous trick and require that `h ()` is `Dupable`, but that would preclude using `StateT` and other functors which contain a function.
 * if `h` and `g` are chosen to be something like `[]` and `Const ()`, `hide` could duplicate `Some`-values.
 
-We can solve both problems by requiring that `h` is a linear control functor, i.e. it admits a function `fmap :: (a %1 -> b) %1 -> h a %1 -> h b`.
-If you don't know about linear control functors and the difference with linear data functors, I recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/).
-What's important here is that linear control functors always contain exactly one element `a` (because the linearity of the second arrow in `fmap`).
-Because of this, we can be sure that a `h (g x)` produced by `expose` does not contain any `Some`-values (if Haskell were strict, but we'll get to that) and the `h (g x)` in `hide` contains just one `g x`.
-
-But this is also very restrictive.
-It forbids functors like `Either e`, because `Left` does not contain an `a`.
-
-I think the solution that fits most use cases is to require that `h` is either a linear control functor or an instance of both a linear version of [`Alt`](https://hackage-content.haskell.org/package/semigroupoids-6.0.2/docs/Data-Functor-Alt.html) and an "affine" functor:
+I think we can solve both issues by requiring that `h` is an instance of a linear version of [`Alt`](https://hackage-content.haskell.org/package/semigroupoids-6.0.2/docs/Data-Functor-Alt.html) and an "affine" functor:
 -}
 
 -- This "Functor" is the linear data Functor
@@ -515,31 +502,29 @@ Because of this, we can be sure that an `h` produced by `expose` does not contai
 Thus, functors like `Const (Some f)` and `Either (Some f)` are forbidden while `Const e` and `Either e` with some `Consumable` `e` are still allowed.
 
 Now let's look at `AffineFunctor`.
-It's similar to a linear control functor in that the mapping function (wrapped in `Affine`) needs to be consumed linearly.
+It's similar to a linear control functor in that the mapping function (wrapped in `Affine`) needs to be consumed linearly (if you don't know about linear control functors and the difference with linear data functors, I recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/)).
 However, the `Affine` wrapper actually stores the function in a non-linear field, which allows `Affine a` to be `Consumable` without needing `Consumable a`.
 Thus, instances of `AffineFunctor` must use the mapping function *at most* once, instead of *exactly once*.
-This provides the same safety guarantee for `hide` that `Control.Functor` would have.
+This provides the same safety guarantee for `hide` that `Control.Functor` would have, but still allows for functors like `Either e` and `ExceptT m e`.
 `Affine` is also equivalent to `Ur` except that `Dupable` should never be implemented for it.
 
 There is just one small thing to get out of the way before we go to the implementation of `hide` and `expose`: we don't want `Some` to work only for types of kind `k -> Type`.
 We will use the kind-heterogeneous type-level lists from `kind-apply`, named [`LoT`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t:LoT) (for List of Types) and the operator [`:@@:`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t::-64--64-:) which applies a type constructor to a `LoT`.
-
-We'll start with an `Alt`/`AffineFunctor`-based definitions of `hide` and `expose` and extend them to allow linear control functors as alternative later.
 -}
 
 data Some f xs where
   Some :: forall x f xs. f x :@@: xs %1 -> Some f xs -- consider the constructor hidden
 
-hideAffineFunctor
+hide
   :: AffineFunctor h
   => (forall x. f x :@@: xs %m -> h (g x :@@: ys)) %1 -> Some f xs %m -> h (Some g ys)
-hideAffineFunctor f (Some @x x) = Some @x <$> f @x x
+hide f (Some @x x) = Some @x <$> f @x x
 
-exposeAlt
+expose
   :: forall x h f g xs ys
    . Alt h
   => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs %1 -> h (g x :@@: ys)
-exposeAlt f x = f (Some @x x) <&> \(Some y) -> Unsafe.coerce y
+expose f x = f (Some @x x) <&> \(Some y) -> Unsafe.coerce y
 {- [markdown]
 
 <details>
@@ -587,147 +572,16 @@ instance AffineFunctor m => AffineFunctor (ExceptT e m) where
 
 </details>
 
-Now let's consider a version of `expose` that uses linear control functors instead of `Alt`.
-Like I said before, these only guarantee that a `h (g x)` produced by `expose` does not contain any `Some`-values if Haskell were strict.
-Let me show why.
--}
-
-exposeControlFunctor
-  :: forall x h f g xs ys
-   . Control.Functor h
-  => (Some f xs %1 -> h (Some g ys)) %1 -> f x :@@: xs %1 -> h (g x :@@: ys)
-exposeControlFunctor f x = f (Some @x x) <&> \(Some y) -> Unsafe.coerce y
-
--- very specific simple Show instance for the purpose of this example
-instance Show a => Show (Some Vec (LoT1 a)) where
-  show (Some x) = "Some (" <> show x <> ")"
-
-problem =
-  NL.fst $
-    exposeControlFunctor @_ @((,) (Some Vec (LoT1 Int)))
-      (\s -> (s, error "The consequences of my actions"))
-      VNil
-
--- >>> problem
--- Some (VNil)
-{- [markdown]
-We have successfully ignored the consequences of our actions and obtained an unrestricted `Some`-value!
-That could be abused to cause all sorts of mayhem in other uses of `preserving0`.
-
-As mentioned before, the problem lies with strictness, or rather laziness.
-The caller of `exposeControlFunctor` can always choose not to evaluate the `Some` in the right side of the tuple, and thus the `Some` in the left side can escape.
-It's not enough to call `deepseq` on the produced `h (Some g ys)` because if we take `State s` as `h` for example, `deepseq` would not ensure `Some g ys` is evaluated to weak-head-normal-form before the tuple in the definition of `State` is created (and the `NFData` instance for `a -> b` has been deprecated for a while anyway).
-Moreover, we don't want to force the entire `h (Some g ys)`-value.
-
-We need an `fmap` that allows evaluating a part of the `a` in `f a` to weak-head-normal-form "as eagerly as possible".
-It must be "a part of `a`", because if we implement this for `StateT s m`, we need to recursively apply the function to `m (a, s)`, and we want to evaluate a part of that `a`, not `m`'s "element" (the tuple `(a, s)`).
-
-We'll accomplish this with a new class called `SeqElement` (name is subject to change):
--}
-
-class Control.Functor f => SeqElement f where
-  mapAndSeq :: Consumable c => (a %1 -> (b, c)) %1 -> f a %1 -> f b
-{- [markdown]
-Let't check that we can define instances for `SeqElement` for some common functors.
--}
-
-instance SeqElement Identity where
-  mapAndSeq extract (Identity a) = extract a & \(b, c) -> lseq c L.$ Identity b
-
-instance SeqElement m => SeqElement (StateT s m) where
-  mapAndSeq extract (StateT f) = StateT L.$ \s -> mapAndSeq extract' L.$ f s
-   where
-    extract' (a, s) = extract a & \(b, c) -> ((b, s), c)
-
-instance SeqElement ((,) a) where
-  mapAndSeq extract (a, b) = extract b & \(d, c) -> lseq c (a, d)
-{- [markdown]
-So far, so good!
-Now let's check that this solves our `problem`.
--}
-
-hideSeqElement
-  :: SeqElement h
-  => (forall x. f x :@@: xs %m -> h (g x :@@: ys)) %1 -> Some f xs %m -> h (Some g ys)
-hideSeqElement f (Some @x x) = Some @x <$> f @x x
-
-seqAndMap :: (SeqElement f, Consumable c) => f a %1 -> (a %1 -> (b, c)) %1 -> f b
-seqAndMap = flip mapAndSeq
-
-exposeSeqElement
-  :: forall x h f g xs ys
-   . SeqElement h
-  => (Some f xs %1 -> h (Some g ys)) %1 -> f x :@@: xs %1 -> h (g x :@@: ys)
-exposeSeqElement f x = f (Some @x x) `seqAndMap` \(Some y) -> (Unsafe.coerce y, ())
-
-problemSolved =
-  NL.fst $
-    exposeSeqElement @_ @((,) (Some Vec (LoT1 Int)))
-      (\s -> (s, error "The consequences of my actions"))
-      VNil
-
--- >>> problemSolved
--- The consequences of my actions
-{- [markdown]
-Calling a problem "solved" when your function returns an `error` instead of a proper value feels odd, but that's what you get when working with unsafe primitives.
-
-Now we need to combine `exposeAlt` with `exposeSeqElement` and `hideAlt` with `hideSeqElement`.
-We'll define a class `Capturing` that requires a functor to be either an instance of `SeqElement` or both `Alt` and `AffineFunctor`.
--}
-
-data Dict :: Constraint -> Type where
-  Dict :: c => Dict c
-
-class Functor f => Capturing f where
-  seqElementOrAltAffine :: Either (Dict (SeqElement f)) (Dict (Alt f, AffineFunctor f))
-
-instance Capturing Identity where
-  seqElementOrAltAffine = Right Dict -- we pick the Alt option, because expose will use fmap instead of mapAndSeq and fmap is more efficient
-
-instance SeqElement m => Capturing (Control.StateT s m) where
-  seqElementOrAltAffine = Left Dict -- Control.StateT is also Alt, but that requires a Consumable s, so the SeqElement option is less stringent
-
-instance Capturing ((,) a) where
-  seqElementOrAltAffine = Left Dict
-
-instance
-  ( Monad m
-  , Alt m
-  , AffineFunctor m
-  , Consumable e
-  )
-  => Capturing (ExceptT e m)
-  where
-  seqElementOrAltAffine = Right Dict
-
-hide
-  :: forall h f g xs ys m
-   . Capturing h
-  => (forall x. f x :@@: xs %m -> h (g x :@@: ys)) %1 -> Some f xs %m -> h (Some g ys)
-hide f (Some @x x) = Some @x <$> f @x x
-
-expose
-  :: forall x h f g xs ys
-   . Capturing h
-  => (Some f xs %1 -> h (Some g ys)) -> f x :@@: xs %1 -> h (g x :@@: ys)
-expose f x = case seqElementOrAltAffine @h of
-  Left Dict -> f (Some @x x) `seqAndMap` \(Some y) -> (Unsafe.coerce y, Just ())
-  Right Dict -> f (Some @x x) <&> \(Some y) -> Unsafe.coerce y
-{- [markdown]
-
 Now we can move on to the optics bit.
-I found out way too late that linear lenses (or rather the linear `Strong` instance for the `Kleisli` profunctor) require that in `f` in `Kleisli f a b` is a linear *control* functor, so in the linear optics world, you can't use the `Alt` + `AffineFunctor` path anyway.
-It's still useful for non-linear optics though, which we'll get back to later.
-
 First, we'll finally have our type-changing safe `partsOf`:
 -}
 
 partsOf
-  :: SeqElement f
+  :: (Alt f, Control.Functor f)
   => Traversal s t a b
   -> Optic_ (Kleisli f) s t (Some Vec (LoT1 a)) (Some Vec (LoT1 b))
 partsOf (Optical o) = Optical $ \(Kleisli f) -> Kleisli L.$ \s ->
-  runBatching (exposeSeqElement f) L.$ runKleisli (o (Kleisli request)) s
+  runBatching (expose f) L.$ runKleisli (o (Kleisli request)) s
 
 -- Taken from the `batching` package: https://hackage.haskell.org/package/batching
 data Batching req resp res where
@@ -765,6 +619,9 @@ demo1 =
 <summary>Required instances and helper functions</summary>
 
 -}
+
+data Dict :: Constraint -> Type where
+  Dict :: c => Dict c
 
 instance NL.Functor (Vec n) where
   fmap _ VNil = VNil
@@ -848,56 +705,74 @@ I need it for something I plan to write an article about later™.
 Now let's see how we can use the version of `partsOf` with non-linear optics.
 -}
 
-type instance Lens.Index (Vec n a) = Int
-type instance Lens.IxValue (Vec n a) = a
+vecHead :: Traversal' (Vec n a) a
+vecHead = traversal $ \f v -> case v of
+  VNil -> pure VNil
+  VCons a as -> flip VCons as Control.<$> f a
 
-instance Lens.Ixed (Vec n a) where
-  ix 0 f (VCons a as) = flip VCons as NL.<$> f a
-  ix i f (VCons a as) = VCons a NL.<$> Lens.ix (pred i) f as
-  ix _ _ VNil = error "a proper `ix` for vectors would use some integral type with a type-level upper bound for the first argument"
+runBatchingNonLinear :: NL.Functor f => (forall n. Vec n req -> f (Vec n resp)) -> Batching req resp res -> f res
+runBatchingNonLinear f (Batching as toRes) = forget toRes NL.<$> f as
 
--- Linear version of Lens.Context
-data Context a b t = Context a (b %1 -> t)
-
-instance Functor (Context a b) where
-  fmap = forget Control.fmap
-
-instance Control.Functor (Context a b) where
-  fmap f (Context a bt) = Context a (f . bt)
-
-instance SeqElement (Context a b) where
-  mapAndSeq f (Context a bt) = Context a L.$ uncurry (flip lseq) . f . bt
-
--- Also from lens
-sell :: a %1 -> Context a b b
-sell a = Context a id
-
-runContext :: NL.Functor f => (a -> f b) -> Context a b t -> f t
-runContext f (Context a bt) = forget bt NL.<$> f a
-
-seqElementLensForget :: (forall f. SeqElement f => Optic_ (Kleisli f) s t a b) -> Lens.Lens s t a b
-seqElementLensForget (Optical o) f s = runContext f (runKleisli (o $ Kleisli sell) s)
+traversalForget
+  :: NL.Applicative f => Optic_ (Kleisli (Batching a b)) s t a b -> Lens.LensLike f s t a b
+traversalForget (Optical o) f s = runBatchingNonLinear (NL.traverse f) (runKleisli (o $ Kleisli request) s)
 
 hidden
   :: forall f s t xs ys a b
-   . Capturing f
-  => (forall x. (a -> f b) -> s x :@@: xs -> f (t x :@@: ys))
-  -> Lens.LensLike f (Some s xs) (Some t ys) a b
-hidden o f = hide (\ @n -> o @n f)
+   . AffineFunctor f
+  => (forall x. Optic_ (Kleisli f) (s x :@@: xs) (t x :@@: ys) a b)
+  -> Optic_ (Kleisli f) (Some s xs) (Some t ys) a b
+hidden o = Optical L.$ \(Kleisli f) -> Kleisli L.$ hide (\ @n -> traverseOf (o @n) f)
 
-demo2 :: Consumable e => Except e [Either Bool Char]
+demo2 :: Consumable e => Except e [Either Bool String]
 demo2 =
-    Lens.traverseOf
-      (seqElementLensForget (partsOf (traversed .> _Right)) . hidden (Lens.ix 1))
-      (NL.pure . toUpper)
-      [Left True, Right 'h', Left False, Right 'i']
+  Lens.traverseOf
+    (traversalForget (partsOf (traversed .> _Right) .> hidden vecHead))
+    (NL.pure . NL.map toUpper)
+    [Left True, Right "hi", Left False, Right "hi"]
 
 -- >>> demo2
--- ExceptT (Identity (Right [Left True,Right 'h',Left False,Right 'I']))
--- notice how the "i" at the end is now capitalized
+-- ExceptT (Identity (Right [Left True,Right "HI",Left False,Right "hi"]))
+
+-- notice how the first "hi" at the end is now capitalized
 {- [markdown]
-As shown above we can run standard optics like `Lens.ix` on `Some` foci using the `hidden` combinator.
-And while the example does not show it, you can see from the type of `hidden` that we could precompose it with standard optics (like `hidden (...) . standardOptic`) because it produces a normal `LensLike`.
+<details>
+<summary>Required instances and helper functions</summary>
+
+-}
+
+class Any a where
+  any :: a
+
+instance Any [a] where
+  any = []
+
+instance AffineFunctor (Batching a b) where
+  afmap f = Control.fmap L.$ runAffine f
+
+instance (Consumable a, Any b) => Alt (Batching a b) where
+  l <!> Batching a bt = lseq a L.$ lseq (bt L.$ vecReplicate any) l
+
+instance NL.Foldable (Vec n) where
+  foldMap _ VNil = NL.mempty
+  foldMap f (VCons a as) = f a NL.<> NL.foldMap f as
+
+instance NL.Traversable (Vec n) where
+  traverse _ VNil = NL.pure VNil
+  traverse f (VCons a as) = NL.liftA2 VCons (f a) (NL.traverse f as)
+
+vecReplicate :: forall n a. KnownNat n => a -> Vec n a
+vecReplicate a = case natSing @n of
+  SZero -> VNil
+  SSucc -> VCons a L.$ vecReplicate a
+{- [markdown]
+
+</details>
+
+The demo shows we can convert linear traversals to non-linear ones using `traversalForget` under some constraints incurred through the use of `Batching`.
+Notably, no linear constraints from the linear optic are carried over.
+
+However, a limitation remains in that we are required to focus on some part of the `Some` focus of `partsOf` before we can escape the linear realm, because the `Alt` instance for `Batching a b` required `a` to be `Consumable`, which `Some` is explicitly not.
 
 ## Wrapping up
 
