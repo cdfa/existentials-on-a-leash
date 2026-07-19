@@ -1,6 +1,8 @@
 {- [markdown]
 # Existentials on a leash
 
+> ⚠️⚠️⚠️ Note from after publishing: the second technique regarding the preservation of hidden type instantiations is actually not safe. I will see if I can fix that within reasonable time or otherwise remove that part from the article.
+
 In this article, I will share a new workaround for the limited nature of existential quantification in current Haskell.
 Specifically, I will show the implementation of an `Exists` quantifier that relieves us from having to wrap existential type variables with a GADT constructor or with a higher-rank function (CPS-style), and instead allows them to appear "naked" in types.
 The quantifier is implemented as a type synonym for a function that linearly consumes a proof-token that ensures proper treatment of existentially typed values.
@@ -428,6 +430,8 @@ lazyVecFromList xs =
 {- [markdown]
 
 ## Invisible type preservation with linear functions
+
+> ⚠️⚠️⚠️ The next part is unsafe. Don't use it.
 
 *I discovered the technique above almost 2 years ago.*
 
