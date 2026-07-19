@@ -460,35 +460,17 @@ For most optics we need something like `traverseSome :: Functor h => (forall x. 
 This also requires adapting `expose`, changing its type to `(Some f %1 -> h (Some g)) -> f x -> h (g x)`
 Without additional constraints, both `expose` and `hide` defined like this are unsafe:
 * if `h` is chosen to be something like `Const (Some f)`, `expose` could let a `Some`-value escape and be used non-linearly. We could apply our previous trick and require that `h ()` is `Dupable`, but that would preclude using `StateT` and other functors which contain a function.
-* if `h` and `g` are chosen to be something like `[]` and `Const ()`, `hide` could duplicate `Some`-values.
+* if `h` and `g` are chosen to be something like `[]` and `Const ()`, respectively, `hide` could duplicate `Some`-values.
 
-I think we can solve both issues by requiring that `h` is an instance of a linear version of [`Alt`](https://hackage-content.haskell.org/package/semigroupoids-6.0.2/docs/Data-Functor-Alt.html) and an "affine" functor:
+I think we can solve both issues by requiring that `h` is a linear control functor and an instance of a linear version of [`Alt`](https://hackage-content.haskell.org/package/semigroupoids-6.0.2/docs/Data-Functor-Alt.html)
 -}
 
 -- This "Functor" is the linear data Functor
 class Functor f => Alt f where
   (<!>) :: Consumable a => f a %1 -> f a %1 -> f a
 
-data Affine a where
-  Affine :: a -> Affine a -- explicit non-linear constructor. Consider the constructor hidden
-
-instance Consumable (Affine a) where
-  consume (Affine _) = ()
-
-affine :: a -> Affine a
-affine = Affine
-
-runAffine :: Affine a %1 -> a
-runAffine (Affine a) = a
-
-liftAffine :: (a -> b) -> Affine a %1 -> Affine b
-liftAffine f (Affine a) = Affine L.$ f a
-
-class Functor f => AffineFunctor f where
-  afmap :: Affine (a %1 -> b) %1 -> f a %1 -> f b
-
 {- [markdown]
-`Alt` makes `expose` safe while `AffineFunctor` makes `hide` safe.
+An `Alt` instance makes `expose` safe while a `Control.Functor` instance makes `hide` safe.
 Let's focus on `Alt` and `expose` first.
 
 Functors that store any non-`Consumable` data other than their element `a` cannot be an instance of `Alt` due to the "left catch" and "left distribution" laws (instances of `Alt` must satisfy at least one of the two):
@@ -501,12 +483,11 @@ Instances that satisfy the left distribution law must do the same because any da
 Because of this, we can be sure that an `h` produced by `expose` does not contain any `Some`-values.
 Thus, functors like `Const (Some f)` and `Either (Some f)` are forbidden while `Const e` and `Either e` with some `Consumable` `e` are still allowed.
 
-Now let's look at `AffineFunctor`.
-It's similar to a linear control functor in that the mapping function (wrapped in `Affine`) needs to be consumed linearly (if you don't know about linear control functors and the difference with linear data functors, I recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/)).
-However, the `Affine` wrapper actually stores the function in a non-linear field, which allows `Affine a` to be `Consumable` without needing `Consumable a`.
-Thus, instances of `AffineFunctor` must use the mapping function *at most* once, instead of *exactly once*.
-This provides the same safety guarantee for `hide` that `Control.Functor` would have, but still allows for functors like `Either e` and `ExceptT m e`.
-`Affine` is also equivalent to `Ur` except that `Dupable` should never be implemented for it.
+Now let's look at `Control.Functor`.
+If you don't know about linear control functors and the difference with linear data functors, I recommend reading [Arnaud's blogpost](https://www.tweag.io/blog/2020-01-16-data-vs-control/).
+The gist is that linear control functors are required to use the function `f` that `fmap` is applied to exactly once.
+This prevents duplication of `Some` values through functors like `[]`.
+In theory, we could be a little more lenient here and say that the `fmap` only needs to use `f` *at most* once, but the linear instance of `Strong` for `Kleisli f` requires that `f` is a linear control functor anyway.
 
 There is just one small thing to get out of the way before we go to the implementation of `hide` and `expose`: we don't want `Some` to work only for types of kind `k -> Type`.
 We will use the kind-heterogeneous type-level lists from `kind-apply`, named [`LoT`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t:LoT) (for List of Types) and the operator [`:@@:`](https://hackage-content.haskell.org/package/kind-apply-0.4.0.1/docs/Data-PolyKinded.html#t::-64--64-:) which applies a type constructor to a `LoT`.
@@ -516,7 +497,7 @@ data Some f xs where
   Some :: forall x f xs. f x :@@: xs %1 -> Some f xs -- consider the constructor hidden
 
 hide
-  :: AffineFunctor h
+  :: Control.Functor h
   => (forall x. f x :@@: xs %m -> h (g x :@@: ys)) %1 -> Some f xs %m -> h (Some g ys)
 hide f (Some @x x) = Some @x <$> f @x x
 
@@ -555,19 +536,6 @@ instance (Monad m, Alt m, Consumable e) => Alt (ExceptT e m) where
       -- because of the case above, this instance only satisfies the left catch law when m satisfies the left catch law, and it only satisfies the left distribution law when m satisfies the left distribution law.
       -- In turn, the case below must satisfy both laws and can not mappend the e from m to another e from n, like the `Alt ExceptT` instance in semigroupoids does.
       Left e -> lseq e n
-
-instance AffineFunctor Identity where
-  afmap f (Identity a) = Identity L.$ runAffine f a
-
-instance AffineFunctor m => AffineFunctor (NL.StateT s m) where
-  afmap f (NL.StateT t) = NL.StateT L.$ \s -> afmap (liftAffine first f) L.$ t s
-
-instance AffineFunctor (Either e) where
-  afmap f (Left e) = lseq f L.$ Left e
-  afmap f (Right a) = Right L.$ runAffine f a
-
-instance AffineFunctor m => AffineFunctor (ExceptT e m) where
-  afmap f (ExceptT m) = ExceptT L.$ afmap (liftAffine fmap f) m
 {- [markdown]
 
 </details>
@@ -719,7 +687,7 @@ traversalForget (Optical o) f s = runBatchingNonLinear (NL.traverse f) (runKleis
 
 hidden
   :: forall f s t xs ys a b
-   . AffineFunctor f
+   . Control.Functor f
   => (forall x. Optic_ (Kleisli f) (s x :@@: xs) (t x :@@: ys) a b)
   -> Optic_ (Kleisli f) (Some s xs) (Some t ys) a b
 hidden o = Optical L.$ \(Kleisli f) -> Kleisli L.$ hide (\ @n -> traverseOf (o @n) f)
@@ -746,9 +714,6 @@ class Any a where
 
 instance Any [a] where
   any = []
-
-instance AffineFunctor (Batching a b) where
-  afmap f = Control.fmap L.$ runAffine f
 
 instance (Consumable a, Any b) => Alt (Batching a b) where
   l <!> Batching a bt = lseq a L.$ lseq (bt L.$ vecReplicate any) l
