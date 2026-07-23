@@ -1,13 +1,12 @@
 
 # Existentials on a leash
 
-In this article, I will share a new workaround for the limited nature of existential quantification in current Haskell.
-Specifically, I will show the implementation of an `Exists` quantifier that relieves us from having to wrap existential type variables with a GADT constructor or with a higher-rank function (CPS-style), and instead allows them to appear "naked" in types.
-The quantifier is implemented as a type synonym for a function that linearly consumes a proof-token that ensures proper treatment of existentially typed values.
+In this article, I will share an encoding for existential types in Haskell that allows them to appear "naked" in types, thus relieving us from having to wrap existential type variables with a GADT constructor or with a higher-rank function (CPS-style).
+The encoding is based on linear functions that consume a proof-token that ensures proper treatment of existentially typed values.
 
 Additionally, I share an independent technique that ensures functions instantiate hidden ("non-naked") existential types in their result with the same type as its input type is instantiated, i.e. they preserve the instantiation of hidden type variables.
-This technique also relies on linear types, but not the existential quantifier mentioned before.
-I will demonstrate this technique by implementing a safe variant of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
+This technique also relies on linear types, but not the encoding mentioned above.
+I will demonstrate by implementing a safe variant of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
 
 Both techniques use `unsafeCoerce`.
 I explain why I believe the coercions are safe, but I haven't proven anything formally.
@@ -16,32 +15,29 @@ Please try to break this stuff if you see some hole I have missed.
 While I will briefly explain what linear types are, this article is not meant as a general introduction to this concept.
 Familiarity with GADTs, linear types and optics (for the sections pertaining to those) is recommended.
 
-That being said, I made it as easy as I can for the reader to tinker with the code and interactively learn about these concepts by providing a [GitHub Codespace](https://codespaces.new/cdfa/existentials-on-a-leash?quickstart=1) prebuild (hint: use "Preview embedded markdown" to see the .hs file with its markdown version to the side).
-Clicking that link will allow you to tinker with the code with the support of the Haskell Language Server without needing to install anything.
+That being said, I made it as easy as I can for the reader to tinker with the code and interactively learn about these concepts by providing a [GitHub Codespace](https://codespaces.new/cdfa/existentials-on-a-leash?quickstart=1) prebuild.
+Clicking that link will allow you to tinker with the code with the support of the Haskell Language Server without needing to install anything (hint: use "Preview embedded markdown" to see the .hs file with its markdown version to the side).
 It might even be a nice way to read the article because you can hover over variables and functions to see their types for example.
 
 ## Current limitations of existential types
 
 As of GHC 9.14, GHC only supports 2 ways of "existentially quantifying" type variables:
-1. With a rank-2 type: `(forall a. a -> r) -> r`. This corresponds to `exists a. (a -> r) -> r`.
+1. With a rank-2 type: `(forall a. a -> r) -> r`. This corresponds to `exists a. (a -> r) -> r` (which is equivalent to `exists a. a`).
 2. Using a GADT: `data Wrapper where Wrapper :: forall a. a -> Wrapper`. When pattern matching on `Wrapper`, `a` will be existentially quantified.
 
 Both these techniques do not actually use existential quantification, but instead encode it through negated universal quantification.
-Wrapping and unwrapping existential types using these techniques is not just cumbersome, but they're also insufficient for defining optics with existentially quantified foci, such as prisms for constructors of GADTs with existentially quantified fields.
-
 [A GHC proposal](https://github.com/goldfirere/ghc-proposals/blob/existentials/proposals/0473-existentials.rst) for adding first-class existential types to GHC was written a while ago, but the author seems to be prioritizing other work.
-The proposal also shows a simple example of a function that is impossible to write using the current workarounds: a lazy `filter :: (a -> Bool) -> Vec n a -> exists m. Vec m a`.
+The proposal also shows a simple example of a function that is impossible to write using the CPS-style or GADT wrapping: a lazy `filter :: (a -> Bool) -> Vec n a -> exists m. Vec m a`.
 
-This article introduces 2 new (as far as I am aware) techniques.
-The first can be used to implement some of the motivating examples from the GHC proposal.
-However, instead a lazy `filter`, I demonstrate the capability for functions to lazily produce an existentially indexed type by defining a function `lazyVecFromList :: [a] -> Exists m (Vec m a)`.
-My initial reason for this was that when I started this project, I was using vectors from an external package which did not export its constructors, and to test a lazy `filter` I also needed a lazy way to create vectors.
+The encoding presented in this article can be used to implement many of the motivating examples from the GHC proposal, including the lazy `filter`.
+However, when I started this project, I was using vectors from an external package which did not export its constructors, and to test a lazy `filter` I also needed a lazy function to create vectors, so that became the main example of the article.
 I didn't end up needing so many existing functions on vectors, so the article now defines its own vectors, but the example stayed.
+So instead of a lazy `filter` function, I'll demonstrate the benefits of the encoding using a function `lazyVecFromList :: [a] -> Exists m (Vec m a)` that lazily converts lists to vectors.
 
-And since that first technique did not work so well for defining optics with existentially quantified types, I also demonstrate a second independent technique that makes such optics possible.
+Sadly, this encoding did not work so well for defining optics with existentially quantified types
+I continued searching and found a different technique that makes such optics possible.
 
-But before we start looking at those workarounds, let's see why we can't write a lazy `vecFromList` without them.
-As mentioned before, we currently have to choose between using a rank-2-type and wrapping the vector in a GADT.
+But before we dive into these techniques, let's see why we can't write a lazy `vecFromList` using CPS-style or GADT wrapping.
 We'll work out the second option, but first we need to enable some language extensions and import some stuff.
 I also define my own `.` because the version from `linear-base` is not as polymorphic as I'd like it to be.
 
@@ -171,7 +167,7 @@ unpack0 f = f Fresh0
 This proxy will serve as a proof-witness that the associated type variable was "existentially quantified" elsewhere in the program.
 The type of `vecFromList` becomes `forall n a. [a] -> Fresh n -> Vec n a` and the burden of the existential quantification is pushed outward to the caller.
 This effectively enlarges the scope of the existential type to wherever the caller (or even its caller) decides to introduce the existential type using `unpack0`.
-By passing the existential quantification witness as an argument to where it is eventually used, we create the leash from which this technique and article get their name.
+By passing the existential quantification witness as an argument to where it is eventually used, we create the leash from which this encoding and article get their name.
 
 Now, we need a way for `vecFromList` to choose a type for `n`.
 Since it is a concrete type (instantiated at the call site), our only option is `unsafeCoerce`.
@@ -439,7 +435,7 @@ While that "inconvenience" of duping/consuming is by design, there are also stil
   * Linear pattern synonyms are not supported yet.
   * All the other limitations mentioned in the [docs](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/linear_types.html#limitations).
 
-So while this linear-existentiality-witness-techinique allows some things that are not possible with the existing existential-type-workarounds, I can't recommend using it outside of cases that are very limited in scope like `lazyVecFromList`.
+So while this encoding for existential types allows some things that are not possible with CPS-style of GADT wrapping, I can't recommend using it outside of cases that are very limited in scope like `lazyVecFromList`.
 
 Luckily, we can define a `lazyVecFromList` that hides all the linear-types complexity and falls back to GADT-wrapper workaround, while still being lazy:
 
@@ -454,12 +450,12 @@ lazyVecFromList xs =
 
 ## Invisible type preservation with linear functions
 
-*I discovered the technique above almost 2 years ago.*
+*I discovered the encoding above almost 2 years ago.*
 
 I put it on GitHub, but never mentioned it because I had not yet succeeded in my actual goal: to make a safe version of the [`unsafePartsOf`](https://hackage-content.haskell.org/package/lens-5.3.6/docs/Control-Lens-Combinators.html#v:unsafePartsOf)`:: Functor f => Traversing (->) f s t a b -> LensLike f s t [a] [b]` optic combinator.
 The hard thing about this is that to enable it to change the types of the foci of the argument traversal (from `a` to `b`), we need to ensure that `[a]` and `[b]` have the same length.
 Because I wanted the optic to be compatible with the existing `lens` ecosystem, a rank-2-type or GADT-wrapper wouldn't work.
-I thought I could use the linear-existentiality-witness-technique, but when I tried it in `partsOf :: Functor f => Traversing (->) f s t a b -> Fresh n %1 -> LensLike f s t (Vec n a) (Vec n b)`, the fact that the resulting optic must be used linearly, makes it just as incompatible with `lens` as the rank-2-type version.
+I thought I could use the existentials-on-a-leash-encoding, but when I tried it in `partsOf :: Functor f => Traversing (->) f s t a b -> Fresh n %1 -> LensLike f s t (Vec n a) (Vec n b)`, the fact that the resulting optic must be used linearly, makes it just as incompatible with `lens` as the rank-2-type version.
 
 To be clear, if you unfold the `LensLike f s t (Vec n a) (Vec n b)` to `(Vec n a -> f (Vec n b)) -> s -> f t`, you could change it to `(forall n. Vec n a -> f (Vec n b)) -> s -> f t` (i.e. use a rank-2-type) and implement `partsOf` just fine, but this optic can't be used in functions like `traverseOf`, nor can it be pre-composed with other optics with `.` (because the `forall n` messes with type inference).
 
@@ -795,5 +791,3 @@ In the meantime, I'll continue working on the other optics I needed these techni
 Thanks for reading and have fun experimenting!
 
 ~cdfa
-
- 
