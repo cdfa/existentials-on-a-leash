@@ -45,7 +45,7 @@ As mentioned before, we currently have to choose between using a rank-2-type and
 We'll work out the second option, but first we need to enable some language extensions and import some stuff.
 I also define my own `.` because the version from `linear-base` is not as polymorphic as I'd like it to be.
 
-<details>
+<details markdown="1">
 <summary>Imports and language extensions</summary>
 
 
@@ -353,7 +353,7 @@ lazyVecFromListIsLazy =
 ```
 
 
-<details>
+<details markdown="1">
 <summary>Required Consumable/Dupable instances</summary>
 
 Nothing special going on here. They just have to be written out manually because `Vec` and `SomeVec` are GADTs.
@@ -538,7 +538,7 @@ expose f x = f (Some @x x) <&> \(Some y) -> Unsafe.coerce y
 ```
 
 
-<details>
+<details markdown="1">
 <summary>Some example instances of `Alt` and `AffineFunctor` to check the most common functors admit an instance.</summary>
 
 
@@ -617,7 +617,7 @@ demo1 =
 -- [Left True,Right "hi",Left False,Right "hi"]
 ```
 
-<details>
+<details markdown="1">
 <summary>Required instances and helper functions</summary>
 
 
@@ -742,7 +742,7 @@ demo2 =
 -- notice how the first "hi" at the end is now capitalized
 ```
 
-<details>
+<details markdown="1">
 <summary>Required instances and helper functions</summary>
 
 
@@ -795,3 +795,5 @@ In the meantime, I'll continue working on the other optics I needed these techni
 Thanks for reading and have fun experimenting!
 
 ~cdfa
+
+ 
